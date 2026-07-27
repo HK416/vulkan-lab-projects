@@ -1,0 +1,20 @@
+{
+  // clangd reads compile_commands.json + .clang-tidy + .clang-format natively.
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build",
+    "--clang-tidy",
+    "--header-insertion=never",
+    "--background-index"
+  ],
+
+  // Disable the MS C/C++ IntelliSense engine so it doesn't fight clangd.
+  "C_Cpp.intelliSenseEngine": "disabled",
+
+  "cmake.configurePreset": "default",
+  "cmake.buildPreset": "default",
+
+  "editor.formatOnSave": true,
+  "[cpp]": { "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd" },
+  "files.encoding": "utf8",
+  "files.eol": "\n"
+}

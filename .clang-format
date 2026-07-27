@@ -1,0 +1,23 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+# Rust-ish base: 4-space indent, 100 columns
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+
+AccessModifierOffset: -4
+NamespaceIndentation: None
+PointerAlignment: Left
+FixNamespaceComments: true
+SortIncludes: CaseInsensitive
+AllowShortFunctionsOnASingleLine: Empty
+
+# When args/params overflow ColumnLimit, put one per line (no bin-packing).
+BinPackArguments: false
+BinPackParameters: false
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false

@@ -1,0 +1,38 @@
+# Force LF, treat all text as UTF-8
+* text=auto eol=lf working-tree-encoding=UTF-8
+
+# C++ sources
+*.h    text eol=lf
+*.hpp  text eol=lf
+*.inl  text eol=lf
+*.c    text eol=lf
+*.cpp  text eol=lf
+*.cxx  text eol=lf
+*.cc   text eol=lf
+
+# Build / project
+*.cmake       text eol=lf
+CMakeLists.txt text eol=lf
+
+# Shaders (Vulkan / GLSL / HLSL)
+*.vert text eol=lf
+*.frag text eol=lf
+*.comp text eol=lf
+*.geom text eol=lf
+*.tesc text eol=lf
+*.tese text eol=lf
+*.glsl text eol=lf
+*.hlsl text eol=lf
+*.spv  binary
+
+# Assets
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ktx   binary
+*.ktx2  binary
+*.dds   binary
+*.gltf  text eol=lf
+*.glb   binary
+*.obj   text eol=lf
+*.bin   binary
