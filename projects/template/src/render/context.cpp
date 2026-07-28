@@ -83,7 +83,9 @@ VkDebugUtilsMessengerCreateInfoEXT makeDebugMessengerInfo() {
 } // namespace
 
 Context::Context(const std::vector<const char*>& requiredInstanceExtensions,
-                 const SurfaceFactory& createSurface) {
+                 const SurfaceFactory& createSurface,
+                 const DeviceFeatures& requestedFeatures)
+    : m_requestedFeatures(requestedFeatures) {
     try {
         createInstance(requiredInstanceExtensions);
 
@@ -269,9 +271,30 @@ void Context::createLogicalDevice() {
         queueInfos.push_back(presentQueueInfo);
     }
 
-    // Enable the modern features labs rely on. Confirmed supported by
-    // MoltenVK; the feature structs are chained via pNext (so pEnabledFeatures
-    // stays null and core features live in features2.features).
+    // Query what the device actually supports so a lab's requested features can
+    // be enabled only where available (drawIndirectCount is absent on MoltenVK).
+    VkPhysicalDeviceVulkan11Features supported11{};
+    supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    VkPhysicalDeviceVulkan12Features supported12{};
+    supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    supported12.pNext = &supported11;
+    VkPhysicalDeviceFeatures2 supported2{};
+    supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    supported2.pNext = &supported12;
+    vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supported2);
+
+    // enabled = requested AND supported; recorded for labs to branch on.
+    const DeviceFeatures& req = m_requestedFeatures;
+    DeviceFeatures& en = m_enabledFeatures;
+    en.multiDrawIndirect = req.multiDrawIndirect && supported2.features.multiDrawIndirect;
+    en.drawIndirectCount = req.drawIndirectCount && supported12.drawIndirectCount;
+    en.descriptorIndexing = req.descriptorIndexing && supported12.descriptorIndexing;
+    en.shaderDrawParameters = req.shaderDrawParameters && supported11.shaderDrawParameters;
+    en.bufferDeviceAddress = req.bufferDeviceAddress && supported12.bufferDeviceAddress;
+
+    // Baseline features every lab needs (always enabled). The structs are chained
+    // via pNext (so pEnabledFeatures stays null and core features live in
+    // features2.features).
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     features13.dynamicRendering = VK_TRUE;
@@ -279,12 +302,25 @@ void Context::createLogicalDevice() {
 
     VkPhysicalDeviceVulkan12Features features12{};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    features12.timelineSemaphore = VK_TRUE;
     features12.pNext = &features13;
+    features12.timelineSemaphore = VK_TRUE;
+    features12.drawIndirectCount = en.drawIndirectCount;
+    features12.descriptorIndexing = en.descriptorIndexing;
+    // Bindless material arrays need runtime-sized, non-uniform-indexed samplers.
+    features12.runtimeDescriptorArray = en.descriptorIndexing;
+    features12.shaderSampledImageArrayNonUniformIndexing = en.descriptorIndexing;
+    features12.bufferDeviceAddress = en.bufferDeviceAddress;
+
+    VkPhysicalDeviceVulkan11Features features11{};
+    features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    features11.pNext = &features12;
+    features11.shaderDrawParameters = en.shaderDrawParameters;
 
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &features12;
+    features2.pNext = &features11;
+    features2.features.multiDrawIndirect = en.multiDrawIndirect;
+    features2.features.drawIndirectFirstInstance = en.multiDrawIndirect;
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

@@ -10,6 +10,19 @@
 
 namespace lab::render {
 
+// Opt-in device features a lab requests. Baseline features every lab needs
+// (dynamic rendering, sync2, timeline semaphores) are always enabled and are
+// not listed here. A requested feature is only enabled if the device actually
+// supports it, so drawIndirectCount silently downgrades on MoltenVK; query
+// Context::enabledFeatures() to branch at runtime.
+struct DeviceFeatures {
+    bool multiDrawIndirect = false;
+    bool drawIndirectCount = false;
+    bool descriptorIndexing = false;
+    bool shaderDrawParameters = false;
+    bool bufferDeviceAddress = false;
+};
+
 // Owns the core Vulkan objects shared by every subsystem: instance, surface,
 // physical/logical device, queues and the VMA allocator.
 //
@@ -27,9 +40,16 @@ public:
     Context& operator=(const Context&) = delete;
 
     Context(const std::vector<const char*>& requiredInstanceExtensions,
-            const SurfaceFactory& createSurface);
+            const SurfaceFactory& createSurface,
+            const DeviceFeatures& requestedFeatures = {});
 
     ~Context();
+
+    // The subset of requestedFeatures actually enabled on this device. Labs
+    // branch on these (e.g. drawIndirectCount is false on MoltenVK).
+    const DeviceFeatures& enabledFeatures() const {
+        return m_enabledFeatures;
+    }
 
     VkInstance getInstance() const {
         return m_instance;
@@ -81,6 +101,9 @@ private:
     // Destroys every owned handle in reverse creation order. noexcept and
     // null-safe so it can run from both the destructor and a failed constructor.
     void destroy() noexcept;
+
+    DeviceFeatures m_requestedFeatures{};
+    DeviceFeatures m_enabledFeatures{};
 
     VkInstance m_instance{VK_NULL_HANDLE};
     VkDebugUtilsMessengerEXT m_debugMessenger{VK_NULL_HANDLE};

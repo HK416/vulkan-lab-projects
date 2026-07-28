@@ -8,6 +8,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include "render/context.h"
+
 struct SDL_Window;
 
 namespace lab::render {
@@ -44,7 +46,10 @@ public:
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
-    App(const std::string& title, int width, int height);
+    App(const std::string& title,
+        int width,
+        int height,
+        const render::DeviceFeatures& features = {});
     virtual ~App();
 
     // Pumps SDL events and renders until the window is closed.
@@ -63,6 +68,7 @@ protected:
     SDL_Window* m_window{nullptr};
     int m_width{0};
     int m_height{0};
+    render::DeviceFeatures m_features{};
 
     std::unique_ptr<render::Context> m_context;
     std::unique_ptr<render::Swapchain> m_swapchain;

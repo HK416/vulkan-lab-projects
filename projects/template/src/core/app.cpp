@@ -15,7 +15,11 @@
 
 namespace lab::core {
 
-App::App(const std::string& title, int width, int height) : m_width(width), m_height(height) {
+App::App(const std::string& title,
+         int width,
+         int height,
+         const render::DeviceFeatures& features)
+    : m_width(width), m_height(height), m_features(features) {
     try {
         initWindowAndContext(title);
         initFrameSync();
@@ -60,7 +64,7 @@ void App::initWindowAndContext(const std::string& title) {
         return surface;
     };
 
-    m_context = std::make_unique<render::Context>(requiredExtensions, createSurface);
+    m_context = std::make_unique<render::Context>(requiredExtensions, createSurface, m_features);
 
     // Use the actual drawable size in pixels (may differ from the logical window
     // size on high-DPI displays).
