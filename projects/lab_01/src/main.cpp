@@ -7,13 +7,22 @@
 
 #include "core/app.h"
 #include "render/command.h"
+#include "render/context.h"
 
 using lab::core::App;
 using lab::core::FrameContext;
+using lab::render::DeviceFeatures;
 
 class IndirectLab : public App {
 public:
-    IndirectLab() : App("lab_01 - indirect rendering", 1280, 720) {}
+    IndirectLab()
+        : App("lab_01 - indirect rendering",
+              1280,
+              720,
+              DeviceFeatures{.multiDrawIndirect = true,
+                             .drawIndirectCount = true,
+                             .descriptorIndexing = true,
+                             .shaderDrawParameters = true}) {}
 
 protected:
     void onRender(const FrameContext& frame) override {
