@@ -31,6 +31,8 @@ struct FrameContext {
     uint32_t imageIndex;
     VkImage image;
     VkImageView imageView;
+    VkImage depth;
+    VkImageView depthView;
     VkExtent2D extent;
 };
 

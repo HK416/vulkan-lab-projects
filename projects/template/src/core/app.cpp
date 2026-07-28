@@ -162,6 +162,8 @@ void App::drawFrame() {
                        imageIndex,
                        m_swapchain->getImages()[imageIndex],
                        m_swapchain->getImageViews()[imageIndex],
+                       m_swapchain->getDepthImage(),
+                       m_swapchain->getDepthImageView(),
                        m_swapchain->getExtent()};
     onRender(frame);
 
