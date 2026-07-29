@@ -3,6 +3,10 @@
 ### Project ###
 # Downloaded glTF sample models (large binaries; fetched, not versioned).
 assets/
+# Run artifacts written to the working directory.
+scene.json
+env.json
+results.csv
 
 ### C ###
 # Prerequisites
