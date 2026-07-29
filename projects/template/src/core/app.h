@@ -46,10 +46,14 @@ public:
     App(const App&) = delete;
     App& operator=(const App&) = delete;
 
+    // uncappedPresent: request a non-vsync (IMMEDIATE) present mode — the
+    // benchmarking labs need it so GPU frame time is not clamped to the display
+    // refresh rate. Falls back to FIFO with a warning if unsupported.
     App(const std::string& title,
         int width,
         int height,
-        const render::DeviceFeatures& features = {});
+        const render::DeviceFeatures& features = {},
+        bool uncappedPresent = false);
     virtual ~App();
 
     // Pumps SDL events and renders until the window is closed.
@@ -69,6 +73,7 @@ protected:
     int m_width{0};
     int m_height{0};
     render::DeviceFeatures m_features{};
+    bool m_uncappedPresent{false};
 
     std::unique_ptr<render::Context> m_context;
     std::unique_ptr<render::Swapchain> m_swapchain;

@@ -18,7 +18,14 @@ public:
     Swapchain(const Swapchain&) = delete;
     Swapchain& operator=(const Swapchain&) = delete;
 
-    Swapchain(Context& context, Swapchain* oldSwapchain, int width, int height);
+    // uncappedPresent: prefer VK_PRESENT_MODE_IMMEDIATE_KHR (no vsync) when the
+    // surface supports it, else fall back to FIFO with a warning. The experiment
+    // needs vsync off so GPU frame time is not clamped to the refresh rate.
+    Swapchain(Context& context,
+              Swapchain* oldSwapchain,
+              int width,
+              int height,
+              bool uncappedPresent = false);
 
     ~Swapchain();
 
@@ -48,7 +55,7 @@ public:
 
 private:
     // Construction split into stages (called in order from the constructor).
-    void createSwapchain(Swapchain* oldSwapchain, int width, int height);
+    void createSwapchain(Swapchain* oldSwapchain, int width, int height, bool uncappedPresent);
     void createImageViews();
     void createDepthResources();
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
+#include <vector>
 
 #include <spdlog/spdlog.h>
 
@@ -26,12 +27,31 @@ VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR& caps, int width, int hei
     return extent;
 }
 
+// FIFO is always supported (vsync). When uncapped, prefer IMMEDIATE (no vsync)
+// if the surface offers it; otherwise warn and stay on FIFO.
+VkPresentModeKHR choosePresentMode(VkPhysicalDevice physicalDevice,
+                                   VkSurfaceKHR surface,
+                                   bool uncapped) {
+    if (!uncapped) {
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+    uint32_t count = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &count, nullptr);
+    std::vector<VkPresentModeKHR> modes(count);
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physicalDevice, surface, &count, modes.data());
+    if (std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_IMMEDIATE_KHR) != modes.end()) {
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+    spdlog::warn("IMMEDIATE present mode unsupported; falling back to FIFO (vsync on)");
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
 } // namespace
 
-Swapchain::Swapchain(Context& context, Swapchain* oldSwapchain, int width, int height)
+Swapchain::Swapchain(Context& context, Swapchain* oldSwapchain, int width, int height, bool uncappedPresent)
     : m_context(&context) {
     try {
-        createSwapchain(oldSwapchain, width, height);
+        createSwapchain(oldSwapchain, width, height, uncappedPresent);
         createImageViews();
         createDepthResources();
     } catch (...) {
@@ -42,7 +62,7 @@ Swapchain::Swapchain(Context& context, Swapchain* oldSwapchain, int width, int h
     }
 }
 
-void Swapchain::createSwapchain(Swapchain* oldSwapchain, int width, int height) {
+void Swapchain::createSwapchain(Swapchain* oldSwapchain, int width, int height, bool uncappedPresent) {
     VkPhysicalDevice physicalDevice = m_context->getPhysicalDevice();
     VkDevice device = m_context->getDevice();
     VkSurfaceKHR surface = m_context->getSurface();
@@ -84,7 +104,7 @@ void Swapchain::createSwapchain(Swapchain* oldSwapchain, int width, int height) 
     info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     info.preTransform = caps.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    info.presentMode = VK_PRESENT_MODE_FIFO_KHR; // Always supported; vsync.
+    info.presentMode = choosePresentMode(physicalDevice, surface, uncappedPresent);
     info.clipped = VK_TRUE;
     info.oldSwapchain = oldSwapchain ? oldSwapchain->m_swapchain : VK_NULL_HANDLE;
 

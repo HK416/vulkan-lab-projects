@@ -18,8 +18,9 @@ namespace lab::core {
 App::App(const std::string& title,
          int width,
          int height,
-         const render::DeviceFeatures& features)
-    : m_width(width), m_height(height), m_features(features) {
+         const render::DeviceFeatures& features,
+         bool uncappedPresent)
+    : m_width(width), m_height(height), m_features(features), m_uncappedPresent(uncappedPresent) {
     try {
         initWindowAndContext(title);
         initFrameSync();
@@ -69,7 +70,8 @@ void App::initWindowAndContext(const std::string& title) {
     // Use the actual drawable size in pixels (may differ from the logical window
     // size on high-DPI displays).
     SDL_GetWindowSizeInPixels(m_window, &m_width, &m_height);
-    m_swapchain = std::make_unique<render::Swapchain>(*m_context, nullptr, m_width, m_height);
+    m_swapchain = std::make_unique<render::Swapchain>(
+        *m_context, nullptr, m_width, m_height, m_uncappedPresent);
     m_commandPool = std::make_unique<render::CommandPool>(*m_context);
 }
 
@@ -229,7 +231,8 @@ void App::recreateSwapchain() {
 
     // Build the new swapchain from the old one, then release the old.
     auto old = std::move(m_swapchain);
-    m_swapchain = std::make_unique<render::Swapchain>(*m_context, old.get(), m_width, m_height);
+    m_swapchain = std::make_unique<render::Swapchain>(
+        *m_context, old.get(), m_width, m_height, m_uncappedPresent);
     old.reset();
 
     // Image count may have changed; rebuild the per-image semaphores (GPU is
