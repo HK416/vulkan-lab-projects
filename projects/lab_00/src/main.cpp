@@ -2,32 +2,39 @@
 // App handles the window, device, swapchain and per-frame synchronization; the
 // lab uploads the cube's geometry, builds a pipeline with embedded SPIR-V, and
 // records the draw in onRender using dynamic rendering.
+//
+// Resource management goes through the template's render/ RAII wrappers
+// (GpuBuffer, Shader, PipelineLayout, GraphicsPipeline) rather than raw Vulkan,
+// so there is no manual cleanup: members release themselves in ~CubeSpin.
 
 #include <array>
 #include <cstdint>
-#include <cstring>
 #include <exception>
+#include <vector>
 
-// Vulkan clip space: depth is [0, 1] (not GL's [-1, 1]). Must be set before any
-// glm header so glm::perspective produces a Vulkan-correct projection.
-#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+// Vulkan clip space: depth is [0, 1] (not GL's [-1, 1]). GLM_FORCE_DEPTH_ZERO_TO_ONE
+// is set workspace-wide (project_deps), so glm::perspective is already Vulkan-correct.
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <spdlog/spdlog.h>
-#include <vma/vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
 
 #include "core/app.h"
-#include "core/vk_check.h"
+#include "render/buffer.h"
 #include "render/command.h"
 #include "render/context.h"
+#include "render/pipeline.h"
+#include "render/shader.h"
 #include "render/swapchain.h"
 
 using lab::core::App;
 using lab::core::FrameContext;
-using lab::render::CommandBuffer;
-using lab::render::Context;
-using lab::render::Swapchain;
+using lab::render::GpuBuffer;
+using lab::render::GraphicsPipeline;
+using lab::render::PipelineBuilder;
+using lab::render::PipelineLayout;
+using lab::render::Shader;
+using lab::render::StagingUploader;
 
 const std::array<float, 24> VERTICES = {
     -0.5f, -0.5f, 0.5f,  // 0: Front-Bottom-Left
@@ -41,23 +48,12 @@ const std::array<float, 24> VERTICES = {
 };
 
 const std::array<uint32_t, 36> INDICES = {
-    0, 1, 2, // Front Face (using vertices 0, 1, 2, 3)
-    2, 3, 0, // Front Face (using vertices 0, 1, 2, 3)
-
-    1, 5, 6, // Right Face (using vertices 1, 5, 6, 2)
-    6, 2, 1, // Right Face (using vertices 1, 5, 6, 2)
-
-    5, 4, 7, // Back Face (using vertices 5, 4, 7, 6)
-    7, 6, 5, // Back Face (using vertices 5, 4, 7, 6)
-
-    4, 0, 3, // Left Face (using vertices 4, 0, 3, 7)
-    3, 7, 4, // Left Face (using vertices 4, 0, 3, 7)
-
-    3, 2, 6, // Top Face (using vertices 3, 2, 6, 7)
-    6, 7, 3, // Top Face (using vertices 3, 2, 6, 7)
-
-    4, 5, 1, // Bottom Face (using vertices 4, 5, 1, 0)
-    1, 0, 4  // Bottom Face (using vertices 4, 5, 1, 0)
+    0, 1, 2, 2, 3, 0, // Front  (0,1,2,3)
+    1, 5, 6, 6, 2, 1, // Right  (1,5,6,2)
+    5, 4, 7, 7, 6, 5, // Back   (5,4,7,6)
+    4, 0, 3, 3, 7, 4, // Left   (4,0,3,7)
+    3, 2, 6, 6, 7, 3, // Top    (3,2,6,7)
+    4, 5, 1, 1, 0, 4  // Bottom (4,5,1,0)
 };
 
 struct PushConstants {
@@ -73,53 +69,17 @@ const uint32_t CUBE_FRAG[] =
 #include "cube.frag.h"
     ;
 
-struct StagingGuard {
-    Context* context{nullptr};
-    VkBuffer buffer{VK_NULL_HANDLE};
-    VmaAllocation allocation{VK_NULL_HANDLE};
-
-    StagingGuard(Context& context) : context(&context) {}
-    ~StagingGuard() {
-        if (context != nullptr && buffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(context->getAllocator(), buffer, allocation);
-        }
-    }
-};
-
-struct ShaderModule {
-    Context* context{nullptr};
-    VkShaderModule module{VK_NULL_HANDLE};
-
-    ShaderModule(Context& context) : context(&context) {}
-    ShaderModule(const ShaderModule&) = delete;
-    ShaderModule& operator=(const ShaderModule&) = delete;
-    ShaderModule(ShaderModule&& o) noexcept : context(o.context), module(o.module) {
-        o.module = VK_NULL_HANDLE;
-    }
-    ~ShaderModule() {
-        if (context != nullptr && module != VK_NULL_HANDLE) {
-            vkDestroyShaderModule(context->getDevice(), module, nullptr);
-        }
-    }
-};
-
 class CubeSpin : public App {
 public:
     CubeSpin() : App("lab_00 - cube", 1280, 720) {
-        try {
-            createBuffer();
-            createPipelineLayout();
-            createPipeline();
-        } catch (...) {
-            vkDeviceWaitIdle(m_context->getDevice());
-            cleanup();
-            throw;
-        }
+        createBuffers();
+        createPipeline();
     }
 
     ~CubeSpin() override {
+        // Members (buffers, pipeline, layout) release on destruction below, while
+        // the base App's Context is still alive — so drain the GPU first.
         vkDeviceWaitIdle(m_context->getDevice());
-        cleanup();
     }
 
 protected:
@@ -177,10 +137,11 @@ protected:
         VkRect2D scissor{{0, 0}, frame.extent};
         vkCmdSetScissor(handle, 0, 1, &scissor);
 
-        vkCmdBindPipeline(handle, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
+        m_pipeline.bind(handle);
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(handle, 0, 1, &m_vertexBuffer, &offset);
-        vkCmdBindIndexBuffer(handle, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        VkBuffer vertexBuffer = m_vertexBuffer.handle();
+        vkCmdBindVertexBuffers(handle, 0, 1, &vertexBuffer, &offset);
+        vkCmdBindIndexBuffer(handle, m_indexBuffer.handle(), 0, VK_INDEX_TYPE_UINT32);
 
         // Camera aimed at the cube's top edge; the cube spins about its Y axis.
         float t = static_cast<float>(m_tick) * 0.02f;
@@ -196,7 +157,7 @@ protected:
         pc.projView = proj * view;
         pc.model = glm::rotate(glm::mat4(1.0f), t, glm::vec3(0.0f, 1.0f, 0.0f));
         vkCmdPushConstants(handle,
-                           m_pipelineLayout,
+                           m_pipeline.layout(),
                            VK_SHADER_STAGE_VERTEX_BIT,
                            0,
                            sizeof(PushConstants),
@@ -215,270 +176,51 @@ protected:
     }
 
 private:
-    void createBuffer() {
-        // create vertex staging buffer
-        StagingGuard vertexStaging{*m_context};
-        {
-            VkBufferCreateInfo createInfo{};
-            createInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            createInfo.size = static_cast<VkDeviceSize>(sizeof(VERTICES));
-            createInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    void createBuffers() {
+        m_vertexBuffer = GpuBuffer::createDeviceLocal(*m_context,
+                                                      sizeof(VERTICES),
+                                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        m_indexBuffer = GpuBuffer::createDeviceLocal(*m_context,
+                                                     sizeof(INDICES),
+                                                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 
-            VmaAllocationCreateInfo allocInfo{};
-            allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
-            allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                              VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-            VmaAllocationInfo info{};
-            VK_CHECK(vmaCreateBuffer(m_context->getAllocator(),
-                                     &createInfo,
-                                     &allocInfo,
-                                     &vertexStaging.buffer,
-                                     &vertexStaging.allocation,
-                                     &info));
-            memcpy(info.pMappedData, VERTICES.data(), sizeof(VERTICES));
-        }
-
-        // create vertex buffer
-        {
-            VkBufferCreateInfo createInfo{};
-            createInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            createInfo.size = static_cast<VkDeviceSize>(sizeof(VERTICES));
-            createInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-
-            VmaAllocationCreateInfo allocInfo{};
-            allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-            VK_CHECK(vmaCreateBuffer(m_context->getAllocator(),
-                                     &createInfo,
-                                     &allocInfo,
-                                     &m_vertexBuffer,
-                                     &m_vertexAllocation,
-                                     nullptr));
-        }
-
-        // create index staging buffer
-        StagingGuard indexStaging{*m_context};
-        {
-            VkBufferCreateInfo createInfo{};
-            createInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            createInfo.size = static_cast<VkDeviceSize>(sizeof(INDICES));
-            createInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-
-            VmaAllocationCreateInfo allocInfo{};
-            allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
-            allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                              VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-            VmaAllocationInfo info{};
-            VK_CHECK(vmaCreateBuffer(m_context->getAllocator(),
-                                     &createInfo,
-                                     &allocInfo,
-                                     &indexStaging.buffer,
-                                     &indexStaging.allocation,
-                                     &info));
-            memcpy(info.pMappedData, INDICES.data(), sizeof(INDICES));
-        }
-
-        // create index buffer
-        {
-            VkBufferCreateInfo createInfo{};
-            createInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            createInfo.size = static_cast<VkDeviceSize>(sizeof(INDICES));
-            createInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-
-            VmaAllocationCreateInfo allocInfo{};
-            allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-            VK_CHECK(vmaCreateBuffer(m_context->getAllocator(),
-                                     &createInfo,
-                                     &allocInfo,
-                                     &m_indexBuffer,
-                                     &m_indexAllocation,
-                                     nullptr));
-        }
-
-        // copy staging to buffer
-        CommandBuffer cmd = m_commandPool->allocate();
-        cmd.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-        cmd.copyBuffer(vertexStaging.buffer, m_vertexBuffer, sizeof(VERTICES));
-        cmd.copyBuffer(indexStaging.buffer, m_indexBuffer, sizeof(INDICES));
-        cmd.end();
-
-        // command submit
-        VkCommandBufferSubmitInfo cmdInfo{};
-        cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-        cmdInfo.commandBuffer = cmd.getHandle();
-        VkSubmitInfo2 submit{};
-        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-        submit.commandBufferInfoCount = 1;
-        submit.pCommandBufferInfos = &cmdInfo;
-        VK_CHECK(vkQueueSubmit2(m_context->getGraphicsQueue(), 1, &submit, VK_NULL_HANDLE));
-        vkDeviceWaitIdle(m_context->getDevice());
-    }
-
-    void createPipelineLayout() {
-        VkPushConstantRange pcRange{};
-        pcRange.size = sizeof(PushConstants);
-        pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-        VkPipelineLayoutCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        createInfo.pushConstantRangeCount = 1;
-        createInfo.pPushConstantRanges = &pcRange;
-
-        VK_CHECK(vkCreatePipelineLayout(m_context->getDevice(),
-                                        &createInfo,
-                                        nullptr,
-                                        &m_pipelineLayout));
-    }
-
-    ShaderModule createShaderModule(const uint32_t* code, size_t byteSize) {
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        createInfo.codeSize = byteSize;
-        createInfo.pCode = code;
-
-        ShaderModule module(*m_context);
-        VK_CHECK(
-            vkCreateShaderModule(m_context->getDevice(), &createInfo, nullptr, &module.module));
-        return module;
+        // Both copies ride one submit; flush() blocks until the upload completes.
+        StagingUploader uploader(*m_context);
+        uploader.upload(m_vertexBuffer, VERTICES.data(), sizeof(VERTICES));
+        uploader.upload(m_indexBuffer, INDICES.data(), sizeof(INDICES));
+        uploader.flush();
     }
 
     void createPipeline() {
-        ShaderModule vertModule = createShaderModule(CUBE_VERT, sizeof(CUBE_VERT));
-        ShaderModule fragModule = createShaderModule(CUBE_FRAG, sizeof(CUBE_FRAG));
+        // Push constants only; no descriptor sets.
+        VkPushConstantRange pcRange{};
+        pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        pcRange.size = sizeof(PushConstants);
+        m_pipelineLayout = PipelineLayout::create(*m_context, {}, {pcRange});
 
-        std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
-        shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-        shaderStages[0].module = vertModule.module;
-        shaderStages[0].pName = "main";
+        Shader vert = Shader::fromSpirv(*m_context, CUBE_VERT, sizeof(CUBE_VERT));
+        Shader frag = Shader::fromSpirv(*m_context, CUBE_FRAG, sizeof(CUBE_FRAG));
 
-        shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        shaderStages[1].module = fragModule.module;
-        shaderStages[1].pName = "main";
+        // Position-only vertex stream (vec3), not the asset layer's full Vertex.
+        std::vector<VkVertexInputBindingDescription> bindings = {
+            {0, sizeof(float) * 3, VK_VERTEX_INPUT_RATE_VERTEX}};
+        std::vector<VkVertexInputAttributeDescription> attributes = {
+            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0}};
 
-        VkVertexInputAttributeDescription attribute{};
-        attribute.format = VK_FORMAT_R32G32B32_SFLOAT;
-
-        VkVertexInputBindingDescription binding{};
-        binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-        binding.stride = sizeof(float) * 3;
-
-        VkPipelineVertexInputStateCreateInfo vertexInput{};
-        vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInput.vertexAttributeDescriptionCount = 1;
-        vertexInput.pVertexAttributeDescriptions = &attribute;
-        vertexInput.vertexBindingDescriptionCount = 1;
-        vertexInput.pVertexBindingDescriptions = &binding;
-
-        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-        VkPipelineDepthStencilStateCreateInfo depthStencil{};
-        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depthStencil.depthTestEnable = VK_TRUE;
-        depthStencil.depthWriteEnable = VK_TRUE;
-        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-        depthStencil.depthBoundsTestEnable = VK_FALSE;
-        depthStencil.stencilTestEnable = VK_FALSE;
-
-        VkPipelineRasterizationStateCreateInfo rasterizer{};
-        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterizer.depthClampEnable = VK_FALSE;
-        rasterizer.rasterizerDiscardEnable = VK_FALSE;
-        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-        rasterizer.lineWidth = 1.0f;
-        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        rasterizer.depthBiasEnable = VK_FALSE;
-
-        VkPipelineMultisampleStateCreateInfo multisample{};
-        multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisample.sampleShadingEnable = VK_FALSE;
-        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        colorBlendAttachment.blendEnable = VK_FALSE;
-
-        VkPipelineColorBlendStateCreateInfo colorBlend{};
-        colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        colorBlend.logicOpEnable = VK_FALSE;
-        colorBlend.logicOp = VK_LOGIC_OP_COPY;
-        colorBlend.attachmentCount = 1;
-        colorBlend.pAttachments = &colorBlendAttachment;
-
-        VkPipelineViewportStateCreateInfo viewportState{};
-        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        viewportState.viewportCount = 1;
-        viewportState.scissorCount = 1;
-
-        std::array<VkDynamicState, 2> dynamicStates = {VK_DYNAMIC_STATE_VIEWPORT,
-                                                       VK_DYNAMIC_STATE_SCISSOR};
-        VkPipelineDynamicStateCreateInfo dynamicState{};
-        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-        dynamicState.pDynamicStates = dynamicStates.data();
-
-        VkPipelineRenderingCreateInfo renderingInfo{};
-        renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-        renderingInfo.colorAttachmentCount = 1;
-        renderingInfo.pColorAttachmentFormats = &Swapchain::SWAPCHAIN_IMAGE_FORMAT;
-        renderingInfo.depthAttachmentFormat = Swapchain::DEPTH_IMAGE_FORMAT;
-
-        VkGraphicsPipelineCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        createInfo.pNext = &renderingInfo;
-        createInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
-        createInfo.pStages = shaderStages.data();
-        createInfo.pViewportState = &viewportState;
-        createInfo.pVertexInputState = &vertexInput;
-        createInfo.pInputAssemblyState = &inputAssembly;
-        createInfo.pDepthStencilState = &depthStencil;
-        createInfo.pRasterizationState = &rasterizer;
-        createInfo.pMultisampleState = &multisample;
-        createInfo.pColorBlendState = &colorBlend;
-        createInfo.pDynamicState = &dynamicState;
-        createInfo.layout = m_pipelineLayout;
-
-        VK_CHECK(vkCreateGraphicsPipelines(m_context->getDevice(),
-                                           m_context->getPipelineCache(),
-                                           1,
-                                           &createInfo,
-                                           nullptr,
-                                           &m_pipeline));
+        // PipelineBuilder bakes the fixed render state (depth LESS test+write, back
+        // cull / CCW, no blend, 1 sample, dynamic viewport/scissor, swapchain
+        // formats) — the same state the old inline setup spelled out by hand.
+        m_pipeline = PipelineBuilder(*m_context)
+                         .shaders(vert.handle(), frag.handle())
+                         .layout(m_pipelineLayout)
+                         .vertexInput(bindings, attributes)
+                         .build();
     }
 
-    void cleanup() {
-        if (m_vertexBuffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(m_context->getAllocator(), m_vertexBuffer, m_vertexAllocation);
-        }
-
-        if (m_indexBuffer != VK_NULL_HANDLE) {
-            vmaDestroyBuffer(m_context->getAllocator(), m_indexBuffer, m_indexAllocation);
-        }
-
-        if (m_pipeline) {
-            vkDestroyPipeline(m_context->getDevice(), m_pipeline, nullptr);
-        }
-
-        if (m_pipelineLayout) {
-            vkDestroyPipelineLayout(m_context->getDevice(), m_pipelineLayout, nullptr);
-        }
-    }
-
-    VkBuffer m_vertexBuffer{VK_NULL_HANDLE};
-    VmaAllocation m_vertexAllocation{VK_NULL_HANDLE};
-
-    VkBuffer m_indexBuffer{VK_NULL_HANDLE};
-    VmaAllocation m_indexAllocation{VK_NULL_HANDLE};
-
-    VkPipelineLayout m_pipelineLayout{VK_NULL_HANDLE};
-    VkPipeline m_pipeline{VK_NULL_HANDLE};
+    GpuBuffer m_vertexBuffer;
+    GpuBuffer m_indexBuffer;
+    PipelineLayout m_pipelineLayout;
+    GraphicsPipeline m_pipeline;
 
     uint64_t m_tick{0};
 };
