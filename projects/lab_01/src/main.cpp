@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -104,7 +105,8 @@ public:
               DeviceFeatures{.multiDrawIndirect = true,
                              .drawIndirectCount = true,
                              .descriptorIndexing = true,
-                             .shaderDrawParameters = true}) {
+                             .shaderDrawParameters = true},
+              /*uncappedPresent=*/true) { // no vsync — GPU time must be unclamped
 
         // Order matters: layout before pipeline, geometry+materials before draw.
         loadModels();
@@ -112,7 +114,7 @@ public:
         createFrameResources(); // per-frame camera/light UBO (set 0)
         createPipeline();
         createScene();
-        // Bench (GpuQueries/CsvReporter) not wired yet — see NOTE at file end.
+        createBench();
     }
 
     ~IndirectLab() override {
@@ -127,6 +129,21 @@ public:
 protected:
     void onRender(const FrameContext& frame) override {
         VkCommandBuffer handle = frame.cmd.getHandle();
+
+        const uint32_t slot = m_frame % App::FRAMES_IN_FLIGHT;
+
+        // Resolve the frame that last used this slot (FRAMES_IN_FLIGHT ago). Its
+        // fence has since signalled, so the queries are ready and reading them
+        // does not block. Doing it now — a frame late — avoids stalling the GPU.
+        if (m_frame >= App::FRAMES_IN_FLIGHT) {
+            recordMeasurement(slot, m_frame - App::FRAMES_IN_FLIGHT, frame.extent);
+        }
+
+        // CPU record timer + GPU query bracket. reset and the begin timestamp must
+        // be OUTSIDE dynamic rendering; the pipeline-stats query goes inside it.
+        m_recordTimer.start();
+        m_queries[slot]->reset(frame.cmd);
+        m_queries[slot]->writeBeginTimestamp(frame.cmd);
 
         // Color + depth to their attachment-optimal layouts. Both are discarded
         // each frame (contents not preserved), so a plain discard-then-clear
@@ -184,7 +201,6 @@ protected:
         const scene::CameraSample cam = scene::sampleCamera(m_path, m_frame, aspect);
 
         // Update this frame-in-flight's UBO (camera + a fixed directional light).
-        const uint32_t slot = m_frame % App::FRAMES_IN_FLIGHT;
         FrameUbo fu;
         fu.viewProj = cam.proj * cam.view;
         fu.camPos = glm::vec4(cam.position, 1.0f);
@@ -213,6 +229,7 @@ protected:
         // mesh) ONCE at setup — a fixed order identical across conditions — or B0
         // thrashes rebinds and A/B0/B1 stop being comparable (see ../README.md).
         m_pipeline.bind(handle);
+        m_queries[slot]->beginPipelineStats(frame.cmd); // inside rendering
         int boundMaterial = -1;
         for (const scene::Instance& inst : m_instances) {
             const PushConstants pc{glm::translate(glm::mat4(1.0f), inst.position) *
@@ -243,19 +260,39 @@ protected:
                 vkCmdDrawIndexed(handle, mesh.indexCount, 1, 0, 0, 0);
             }
         }
+        m_queries[slot]->endPipelineStats(frame.cmd); // before end-rendering
 
         vkCmdEndRendering(handle);
+
+        m_queries[slot]->writeEndTimestamp(frame.cmd); // outside rendering
 
         frame.cmd.transitionImageLayout(frame.image,
                                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
+        m_recordMs[slot] = m_recordTimer.stopMilliseconds();
         ++m_frame;
+    }
 
-        // Bench still to wire: bracket the loop with GpuQueries (reset + timestamps
-        // + pipeline-stats) and a CpuTimer; resolve the PREVIOUS frame's queries
-        // here (resolve blocks on a signalled fence) and write a bench::Record via
-        // CsvReporter; skip ~300 warm-up frames. See the NOTEs at the file end.
+    // Resolve one slot's queries and (past warm-up) append a CSV row. cpuSubmitMs
+    // stays 0: App owns submit, so onRender can only time recording (see NOTE).
+    void recordMeasurement(uint32_t slot, uint64_t doneFrame, VkExtent2D extent) {
+        const double gpuMs = m_queries[slot]->resolveGpuMilliseconds();
+        const bench::GpuQueries::PipelineStats stats = m_queries[slot]->resolvePipelineStats();
+        if (doneFrame < WARMUP_FRAMES) {
+            return; // discard warm-up frames
+        }
+        bench::Record r;
+        r.condition = "A0xB0";
+        r.width = extent.width;
+        r.height = extent.height;
+        r.objectCount = static_cast<uint32_t>(m_instances.size());
+        r.gpuMs = gpuMs;
+        r.cpuRecordMs = m_recordMs[slot];
+        r.triangles = stats.inputAssemblyPrimitives;
+        r.vertexInvocations = stats.vertexShaderInvocations;
+        r.fragmentInvocations = stats.fragmentShaderInvocations;
+        m_reporter->write(r);
     }
 
 private:
@@ -423,6 +460,19 @@ private:
         m_path = scene::makeSweepPath(center, span * 1.5f, span);
     }
 
+    // One GpuQueries per frame-in-flight so a frame's queries are only read after
+    // its fence has signalled (see recordMeasurement). Environment dumped once.
+    void createBench() {
+        for (auto& q : m_queries) {
+            q.emplace(*m_context);
+        }
+        m_reporter.emplace("results.csv");
+        bench::dumpEnvironmentJson(*m_context, "env.json");
+        if (!m_queries[0]->gpuSupported()) {
+            spdlog::warn("GPU timestamps unsupported on this device; gpuMs will be 0");
+        }
+    }
+
     // Declaration order matters for destruction (reverse): pipeline before its
     // layout, sets before their pool. All borrow the base App's Context.
     std::vector<GpuMesh> m_meshes;
@@ -439,8 +489,14 @@ private:
     std::vector<scene::Instance> m_instances;
     scene::CameraPath m_path;
 
-    // Bench members to add later: std::optional<bench::GpuQueries> (no default
-    // ctor), std::optional<bench::CsvReporter>, bench::CpuTimer.
+    // Bench: measurements start after this many frames (warm-up discarded).
+    static constexpr uint64_t WARMUP_FRAMES = 300;
+    std::array<std::optional<bench::GpuQueries>, App::FRAMES_IN_FLIGHT>
+        m_queries; // no default ctor
+    std::array<double, App::FRAMES_IN_FLIGHT> m_recordMs{};
+    std::optional<bench::CsvReporter> m_reporter;
+    bench::CpuTimer m_recordTimer;
+
     uint64_t m_frame{0};
 };
 
