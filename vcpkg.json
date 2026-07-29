@@ -7,11 +7,14 @@
     "spdlog",
     "vulkan-memory-allocator",
     "stb",
+    "cgltf",
     "ktx",
     "glm",
     {
       "name": "sdl3",
-      "features": ["vulkan"]
+      "features": [
+        "vulkan"
+      ]
     }
   ]
 }

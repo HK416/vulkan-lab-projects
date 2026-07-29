@@ -14,6 +14,9 @@ find_package(Ktx CONFIG REQUIRED)
 find_package(Stb REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 
+# cgltf is a header-only single-file lib; the vcpkg port only copies the header.
+find_path(CGLTF_INCLUDE_DIR NAMES cgltf.h REQUIRED)
+
 find_path(VMA_HEADER_DIR NAMES vk_mem_alloc.h PATH_SUFFIXES vma REQUIRED)
 get_filename_component(_vma_leaf "${VMA_HEADER_DIR}" NAME)
 if(_vma_leaf STREQUAL "vma")
@@ -26,6 +29,9 @@ endif()
 
 # Shared deps. Every project links this one interface target.
 add_library(project_deps INTERFACE)
+# Vulkan clip space (depth 0..1) for every glm::perspective in the workspace, so
+# projection matrices are consistent no matter which TU builds them.
+target_compile_definitions(project_deps INTERFACE GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_link_libraries(project_deps INTERFACE
     Vulkan::Vulkan
     spdlog::spdlog
@@ -37,6 +43,7 @@ target_link_libraries(project_deps INTERFACE
 # SYSTEM: silence third-party header warnings (e.g. VMA nullability on Apple clang).
 target_include_directories(project_deps SYSTEM INTERFACE ${VMA_INCLUDE_ROOT})
 target_include_directories(project_deps SYSTEM INTERFACE ${Stb_INCLUDE_DIR})
+target_include_directories(project_deps SYSTEM INTERFACE ${CGLTF_INCLUDE_DIR})
 
 
 # Shared framework first — every lab links it.

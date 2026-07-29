@@ -321,6 +321,9 @@ void Context::createLogicalDevice() {
     features2.pNext = &features11;
     features2.features.multiDrawIndirect = en.multiDrawIndirect;
     features2.features.drawIndirectFirstInstance = en.multiDrawIndirect;
+    // Baseline: every lab benchmarks, so enable pipeline-statistics queries when
+    // the device offers them (bench::GpuQueries degrades gracefully if not).
+    features2.features.pipelineStatisticsQuery = supported2.features.pipelineStatisticsQuery;
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
