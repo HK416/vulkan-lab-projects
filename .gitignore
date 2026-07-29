@@ -1,5 +1,9 @@
 # Created by https://www.toptal.com/developers/gitignore/
 
+### Project ###
+# Downloaded glTF sample models (large binaries; fetched, not versioned).
+assets/
+
 ### C ###
 # Prerequisites
 *.d
