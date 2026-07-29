@@ -71,7 +71,7 @@ A는 두 축(버퍼 레이아웃 × 드로우 기법)이 섞인 목적형 집합
 - **프레젠트 모드** — `VK_PRESENT_MODE_IMMEDIATE_KHR` (vsync 제거).
 - **프레임 인플라이트 수, 스왑체인 이미지 수.**
 - **깊이 프리패스 유무, MSAA, 텍스처 밉/이방성 필터링.**
-- **텍스처 총량·포맷** — BC7로 사전 압축해 통일.
+- **텍스처 총량·포맷** — 모든 조건이 동일한 무압축 RGBA8(stb 로드)로 통일.
 - **렌더 순서** — 조건 간 동일한 그리기 순서 (오버드로우 패턴 고정).
 - **Bindless 인덱스 경로** — 오브젝트 인덱스가 셰이더에 도달하는 법을 고정.
   `gl_DrawID`(멀티드로우) vs `gl_BaseInstance` 트릭(오브젝트별)이 조건마다
@@ -233,7 +233,7 @@ conditions** (experiment 1, culling off).
 - **Present mode** — `VK_PRESENT_MODE_IMMEDIATE_KHR` (remove vsync).
 - **Frames in flight, swapchain image count.**
 - **Depth pre-pass presence, MSAA, texture mip/anisotropic filtering.**
-- **Total texture amount and format** — unify via pre-compressed BC7.
+- **Total texture amount and format** — unify as uncompressed RGBA8 (stb-loaded) across all conditions.
 - **Render order** — identical draw order across conditions (fixed overdraw pattern).
 - **Bindless index path** — fix how the object index reaches the shader.
   If `gl_DrawID` (multi-draw) vs the `gl_BaseInstance` trick (per-object) differs

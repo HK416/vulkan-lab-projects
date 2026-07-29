@@ -31,7 +31,7 @@ lab_01/src/
 
 template/src/ (재사용, 구현 완료)
   asset/loader.*    cgltf glTF 로드 → CpuModel(메시/머티리얼). standardVertexInput().
-  asset/texture.*   KTX2(BC7/큐브맵) → GpuImage. loadKtx / loadIbl.
+  asset/texture.*   loadImage2D(PNG/JPG→RGBA8, stb) 머티리얼용; loadKtx/loadIbl(IBL 큐브맵).
   render/buffer.*   GpuBuffer(device-local/host-visible), StagingUploader(배치 업로드).
   render/descriptor.* DescriptorSetLayout/Pool/Writer (B0 머티리얼 세트 + 이후 B1 bindless).
   render/pipeline.* PipelineBuilder(고정 렌더 상태 bake), PipelineLayout, GraphicsPipeline.
@@ -49,7 +49,8 @@ template/src/ (재사용, 구현 완료)
 ## 데이터 흐름
 
 1. `asset::loadModel` — 모델 세트 M의 glTF를 `CpuModel`로 로드(프리미티브 → 정점/인덱스
-   + 머티리얼 인덱스). 텍스처 경로는 BC7 사전 압축 KTX2를 `asset::loadKtx`로 로드.
+   + 머티리얼 인덱스). 텍스처는 glTF의 PNG/JPG를 `asset::loadImage2D`(stb)로 직접
+   로드 — 무압축 RGBA8, 오프라인 변환 없음. baseColor=sRGB, normal/metalRough=linear.
 2. **A0 GPU 업로드** — 메시마다 `GpuBuffer::createDeviceLocal` 2개(vertex, index).
    `StagingUploader`로 배치 업로드(오프셋 공유 없음, 메시당 바인딩).
 3. **B0 머티리얼** — 머티리얼마다 descriptor set 1개(`DescriptorSetLayout`/`Pool`,
@@ -159,7 +160,7 @@ lab_01/src/
 
 template/src/ (reused, implemented)
   asset/loader.*    cgltf glTF → CpuModel (mesh/material). standardVertexInput().
-  asset/texture.*   KTX2 (BC7/cubemap) → GpuImage. loadKtx / loadIbl.
+  asset/texture.*   loadImage2D (PNG/JPG→RGBA8 via stb) for materials; loadKtx/loadIbl (IBL cubemaps).
   render/buffer.*   GpuBuffer (device-local/host-visible), StagingUploader (batched upload).
   render/descriptor.* DescriptorSetLayout/Pool/Writer (B0 material sets + later B1 bindless).
   render/pipeline.* PipelineBuilder (bakes fixed render state), PipelineLayout, GraphicsPipeline.
@@ -177,8 +178,9 @@ Dependencies: **cgltf**, **ktx** — already in `vcpkg.json` + the top-level `pr
 ## Data flow
 
 1. `asset::loadModel` — load the glTF files of model set M into `CpuModel` (each
-   primitive → vertex/index arrays + material index). Textures loaded from
-   pre-compressed BC7 KTX2 via `asset::loadKtx`.
+   primitive → vertex/index arrays + material index). Textures loaded straight
+   from the glTF's PNG/JPG via `asset::loadImage2D` (stb, uncompressed RGBA8, no
+   offline step). baseColor = sRGB, normal/metallic-roughness = linear.
 2. **A0 GPU upload** — two `GpuBuffer::createDeviceLocal` per mesh (vertex, index),
    batched through `StagingUploader` (no shared offsets, bind per mesh).
 3. **B0 materials** — one descriptor set per material (`DescriptorSetLayout`/`Pool`,

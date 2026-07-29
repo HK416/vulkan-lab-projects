@@ -9,8 +9,9 @@ namespace lab::render {
 
 class Context;
 
-// Move-only VMA image + default view. Format comes from whoever creates it (BC7
-// for the pre-compressed material textures). Mip level count is stored; the
+// Move-only VMA image + default view. Format comes from whoever creates it
+// (RGBA8 for stb-loaded material textures, a KTX format for IBL). Mip count is
+// stored; the
 // sampler (mip/anisotropy settings — a fixed experiment control) is created and
 // bound by the lab, not here.
 class GpuImage {

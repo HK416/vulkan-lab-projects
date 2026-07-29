@@ -36,7 +36,7 @@ struct MeshData {
 };
 
 // Metallic-roughness PBR inputs. Textures are resolved image paths (loaded as
-// pre-compressed BC7 KTX2); empty string means "use the factor alone".
+// loaded as RGBA8 via asset::loadImage2D); empty string means "use the factor alone".
 struct MaterialData {
     glm::vec4 baseColorFactor{1.0f};
     float metallicFactor = 1.0f;

@@ -9,6 +9,9 @@
 #include <ktx.h>
 #include <vulkan/vulkan.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 #include "core/vk_check.h"
 #include "render/buffer.h"
 #include "render/command.h"
@@ -49,6 +52,56 @@ void imageBarrier(VkCommandBuffer cmd,
     dep.imageMemoryBarrierCount = 1;
     dep.pImageMemoryBarriers = &b;
     vkCmdPipelineBarrier2(cmd, &dep);
+}
+
+// Immediate blocking upload: UNDEFINED -> copy all regions -> SHADER_READ_ONLY,
+// one submit. Shared by loadKtx (mip chain / cube faces) and loadImage2D.
+void blockingImageUpload(render::Context& context,
+                         VkImage image,
+                         VkBuffer staging,
+                         const std::vector<VkBufferImageCopy>& regions) {
+    render::CommandPool pool(context);
+    render::CommandBuffer cmd = pool.allocate();
+    cmd.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+    imageBarrier(cmd.getHandle(),
+                 image,
+                 VK_IMAGE_LAYOUT_UNDEFINED,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                 VK_ACCESS_2_NONE,
+                 VK_PIPELINE_STAGE_2_COPY_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+    vkCmdCopyBufferToImage(cmd.getHandle(),
+                           staging,
+                           image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<uint32_t>(regions.size()),
+                           regions.data());
+
+    imageBarrier(cmd.getHandle(),
+                 image,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COPY_BIT,
+                 VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                 VK_ACCESS_2_SHADER_READ_BIT);
+
+    cmd.end();
+
+    VkCommandBufferSubmitInfo cmdInfo{};
+    cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    cmdInfo.commandBuffer = cmd.getHandle();
+    VkSubmitInfo2 submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submit.commandBufferInfoCount = 1;
+    submit.pCommandBufferInfos = &cmdInfo;
+
+    render::Fence fence(context);
+    VK_CHECK(vkQueueSubmit2(context.getGraphicsQueue(), 1, &submit, fence.getHandle()));
+    fence.wait();
 }
 
 } // namespace
@@ -130,51 +183,7 @@ render::GpuImage loadKtx(render::Context& context, const std::string& path) {
         }
     }
 
-    // Immediate blocking upload: transition -> copy all mips -> transition to
-    // shader-read, one submit.
-    render::CommandPool pool(context);
-    render::CommandBuffer cmd = pool.allocate();
-    cmd.begin(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-
-    imageBarrier(cmd.getHandle(),
-                 image.handle(),
-                 VK_IMAGE_LAYOUT_UNDEFINED,
-                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                 VK_ACCESS_2_NONE,
-                 VK_PIPELINE_STAGE_2_COPY_BIT,
-                 VK_ACCESS_2_TRANSFER_WRITE_BIT);
-
-    vkCmdCopyBufferToImage(cmd.getHandle(),
-                           staging.handle(),
-                           image.handle(),
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           static_cast<uint32_t>(regions.size()),
-                           regions.data());
-
-    imageBarrier(cmd.getHandle(),
-                 image.handle(),
-                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_COPY_BIT,
-                 VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                 VK_ACCESS_2_SHADER_READ_BIT);
-
-    cmd.end();
-
-    VkCommandBufferSubmitInfo cmdInfo{};
-    cmdInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    cmdInfo.commandBuffer = cmd.getHandle();
-    VkSubmitInfo2 submit{};
-    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-    submit.commandBufferInfoCount = 1;
-    submit.pCommandBufferInfos = &cmdInfo;
-
-    render::Fence fence(context);
-    VK_CHECK(vkQueueSubmit2(context.getGraphicsQueue(), 1, &submit, fence.getHandle()));
-    fence.wait();
-
+    blockingImageUpload(context, image.handle(), staging.handle(), regions);
     return image;
 }
 
@@ -187,6 +196,56 @@ Ibl loadIbl(render::Context& context,
     ibl.irradiance = loadKtx(context, irradiancePath);
     ibl.brdfLut = loadKtx(context, brdfLutPath);
     return ibl;
+}
+
+render::GpuImage loadImage2D(render::Context& context, const std::string& path, bool srgb) {
+    // Decode to RGBA8 via stb (PNG/JPG). Uncompressed — no offline KTX/BC7/ASTC
+    // step, works on any device. Single mip level.
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc* pixels = stbi_load(path.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+    if (!pixels) {
+        throw std::runtime_error("loadImage2D: cannot load " + path + ": " + stbi_failure_reason());
+    }
+    struct PixelGuard {
+        stbi_uc* p;
+        ~PixelGuard() {
+            stbi_image_free(p);
+        }
+    } guard{pixels};
+
+    const VkDeviceSize dataSize = static_cast<VkDeviceSize>(width) * height * 4;
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    imageInfo.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    render::GpuImage image = render::GpuImage::create(context,
+                                                      imageInfo,
+                                                      VK_IMAGE_VIEW_TYPE_2D,
+                                                      VK_IMAGE_ASPECT_COLOR_BIT);
+
+    render::GpuBuffer staging =
+        render::GpuBuffer::createHostVisible(context, dataSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    std::memcpy(staging.mapped(), pixels, dataSize);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+
+    blockingImageUpload(context, image.handle(), staging.handle(), {region});
+    return image;
 }
 
 } // namespace lab::asset

@@ -10,9 +10,14 @@ class Context;
 
 namespace lab::asset {
 
-// Loads a KTX2 texture (BC7 material textures, or IBL cubemaps) to a device-local
-// render::GpuImage with its full mip chain. Throws std::runtime_error on failure.
+// Loads a KTX2 texture (pre-compressed material textures, or IBL cubemaps) to a
+// device-local render::GpuImage with its full mip chain. Throws on failure.
 render::GpuImage loadKtx(render::Context& context, const std::string& path);
+
+// Loads a PNG/JPG via stb to an uncompressed RGBA8 render::GpuImage (single mip).
+// No offline conversion step; pass srgb=true for color (baseColor/emissive),
+// false for linear data (normal, metallic-roughness, occlusion). Throws on failure.
+render::GpuImage loadImage2D(render::Context& context, const std::string& path, bool srgb);
 
 // Fixed image-based lighting. Precomputed offline and loaded as KTX (no runtime
 // prefilter pass), so it stays deterministic. One shared scene resource bound
