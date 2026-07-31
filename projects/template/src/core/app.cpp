@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include "bench/capture.h"
+#include "core/env.h"
 #include "core/vk_check.h"
 #include "render/buffer.h"
 #include "render/command.h"
@@ -18,25 +19,6 @@
 #include "render/sync.h"
 
 namespace lab::core {
-namespace {
-
-// Environment overrides (see App's member docs). Absent or unparseable = absent;
-// a typo'd LAB_FRAMES must not silently truncate a benchmark run, so anything
-// that is not a plain number is reported.
-int64_t envInt(const char* name, int64_t fallback) {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || *raw == '\0') {
-        return fallback;
-    }
-    try {
-        return std::stoll(raw);
-    } catch (const std::exception&) {
-        spdlog::warn("{}='{}' is not a number; ignoring", name, raw);
-        return fallback;
-    }
-}
-
-} // namespace
 
 App::App(const std::string& title,
          int width,
@@ -46,8 +28,7 @@ App::App(const std::string& title,
     : m_width(width), m_height(height), m_features(features), m_uncappedPresent(uncappedPresent) {
     m_maxFrames = static_cast<uint64_t>(std::max<int64_t>(0, envInt("LAB_FRAMES", 0)));
     m_captureFrame = envInt("LAB_CAPTURE", -1);
-    const char* file = std::getenv("LAB_CAPTURE_FILE");
-    m_captureFile = (file != nullptr && *file != '\0') ? file : "capture.png";
+    m_captureFile = envStr("LAB_CAPTURE_FILE", "capture.png");
     if (m_captureFrame >= 0 && m_maxFrames != 0 &&
         static_cast<uint64_t>(m_captureFrame) >= m_maxFrames) {
         throw std::runtime_error("LAB_CAPTURE frame is never reached with this LAB_FRAMES");

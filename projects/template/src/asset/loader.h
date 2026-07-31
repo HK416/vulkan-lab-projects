@@ -52,6 +52,14 @@ struct MaterialData {
 struct CpuModel {
     std::vector<MeshData> meshes;
     std::vector<MaterialData> materials;
+
+    // AABB over every mesh, in the space the vertices are uploaded in. The model
+    // set M mixes wildly different authored scales (Avocado ~0.07 units, Lantern
+    // ~5), so a scene that placed them raw would give each model a different
+    // fragment load — and the resolution axis would stop meaning anything. Labs
+    // normalize placement against this; it is measured, not guessed per model.
+    glm::vec3 min{0.0f};
+    glm::vec3 max{0.0f};
 };
 
 // Loads a .gltf/.glb via cgltf. Throws std::runtime_error on failure. Reads

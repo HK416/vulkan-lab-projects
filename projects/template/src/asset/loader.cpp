@@ -150,6 +150,21 @@ CpuModel loadModel(const std::string& path) {
         }
     }
 
+    // AABB over everything that was actually loaded (one pass; positions are
+    // already in memory). Left at 0 for an empty model.
+    bool first = true;
+    for (const MeshData& mesh : model.meshes) {
+        for (const Vertex& v : mesh.vertices) {
+            if (first) {
+                model.min = model.max = v.position;
+                first = false;
+            } else {
+                model.min = glm::min(model.min, v.position);
+                model.max = glm::max(model.max, v.position);
+            }
+        }
+    }
+
     return model;
 }
 
