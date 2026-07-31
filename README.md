@@ -66,9 +66,15 @@ cmake --build --preset default --target lab_00
 | [lab_02](projects/lab_02/README.md) | A0 × B1 | 〃 | Bindless (세트 1회 바인딩) |
 | [lab_03](projects/lab_03/README.md) | A1 × B0 | 메시당 VkBuffer + **버퍼당 indirect** | 머티리얼당 descriptor set |
 | [lab_04](projects/lab_04/README.md) | A1 × B1 | 〃 | Bindless |
+| [lab_05](projects/lab_05/README.md) | A2 × B0 | **단일 버퍼** + 오브젝트당 indirect | 머티리얼당 descriptor set |
+| [lab_06](projects/lab_06/README.md) | A2 × B1 | 〃 | Bindless |
 
-네 조건이 A0/A1 × B0/B1의 완전한 2×2를 이루므로 각 축을 두 번씩 독립 비교할 수
-있다. 유효 조건은 총 7개(A3 × B0은 불가능)이며 A2·A3는 미구현이다.
+유효 조건은 총 7개(A3 × B0은 불가능)이며 **A3(lab_07) 하나만 미구현**이다.
+
+**비교쌍 주의** — A 요인은 직교가 아니다. 단독 결론에 쓸 수 있는 쌍은
+**A0 vs A1**(lab_01↔03, lab_02↔04)과 **A2 vs A3**(lab_05/06↔07)뿐이다.
+A1 vs A2는 버퍼 전략과 granularity가 함께 바뀌므로 금지. B0 vs B1은 같은 A 수준
+안에서 세 번(lab_01↔02, 03↔04, 05↔06) 독립 비교할 수 있다.
 
 ### 랩 실행 (환경변수)
 
@@ -170,10 +176,17 @@ is the single source of truth for the design, factors and measurement protocol.
 | [lab_02](projects/lab_02/README.md) | A0 × B1 | same | bindless (set bound once) |
 | [lab_03](projects/lab_03/README.md) | A1 × B0 | VkBuffer per mesh + **per-buffer indirect** | one descriptor set per material |
 | [lab_04](projects/lab_04/README.md) | A1 × B1 | same | bindless |
+| [lab_05](projects/lab_05/README.md) | A2 × B0 | **single buffer** + per-object indirect | one descriptor set per material |
+| [lab_06](projects/lab_06/README.md) | A2 × B1 | same | bindless |
 
-These four form a complete A0/A1 × B0/B1 grid, so each axis can be compared twice
-independently. There are 7 valid conditions in total (A3 × B0 is impossible); A2
-and A3 are not implemented yet.
+There are 7 valid conditions in total (A3 × B0 is impossible); **only A3 (lab_07)
+is left**.
+
+**Mind the comparison pairs** — factor A is not orthogonal. The only pairs valid
+for a standalone conclusion are **A0 vs A1** (lab_01↔03, lab_02↔04) and **A2 vs
+A3** (lab_05/06↔07). A1 vs A2 changes buffer strategy and granularity together and
+is forbidden. B0 vs B1 can be compared three times independently, once per A level
+(lab_01↔02, 03↔04, 05↔06).
 
 ### Running a lab (environment variables)
 
