@@ -29,9 +29,8 @@ VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR& caps, int width, int hei
 
 // FIFO is always supported (vsync). When uncapped, prefer IMMEDIATE (no vsync)
 // if the surface offers it; otherwise warn and stay on FIFO.
-VkPresentModeKHR choosePresentMode(VkPhysicalDevice physicalDevice,
-                                   VkSurfaceKHR surface,
-                                   bool uncapped) {
+VkPresentModeKHR
+choosePresentMode(VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, bool uncapped) {
     if (!uncapped) {
         return VK_PRESENT_MODE_FIFO_KHR;
     }
@@ -48,7 +47,11 @@ VkPresentModeKHR choosePresentMode(VkPhysicalDevice physicalDevice,
 
 } // namespace
 
-Swapchain::Swapchain(Context& context, Swapchain* oldSwapchain, int width, int height, bool uncappedPresent)
+Swapchain::Swapchain(Context& context,
+                     Swapchain* oldSwapchain,
+                     int width,
+                     int height,
+                     bool uncappedPresent)
     : m_context(&context) {
     try {
         createSwapchain(oldSwapchain, width, height, uncappedPresent);
@@ -62,7 +65,10 @@ Swapchain::Swapchain(Context& context, Swapchain* oldSwapchain, int width, int h
     }
 }
 
-void Swapchain::createSwapchain(Swapchain* oldSwapchain, int width, int height, bool uncappedPresent) {
+void Swapchain::createSwapchain(Swapchain* oldSwapchain,
+                                int width,
+                                int height,
+                                bool uncappedPresent) {
     VkPhysicalDevice physicalDevice = m_context->getPhysicalDevice();
     VkDevice device = m_context->getDevice();
     VkSurfaceKHR surface = m_context->getSurface();

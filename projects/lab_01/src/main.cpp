@@ -14,7 +14,6 @@
 #include <cstring>
 #include <exception>
 #include <iterator>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -60,7 +59,7 @@ using lab::render::StagingUploader;
 
 // Model set M. Identical list and order in every lab — k and the material count
 // it implies are experiment controls, not a per-lab choice.
-const char* MODELS[] = {
+const char* const MODELS[] = {
     "assets/Avocado/Avocado.gltf",
     "assets/BoomBox/BoomBox.gltf",
     "assets/Corset/Corset.gltf",
@@ -184,8 +183,8 @@ protected:
         // CPU record timer + GPU query bracket. reset and the begin timestamp must
         // be OUTSIDE dynamic rendering; the pipeline-stats query goes inside it.
         m_recordTimer.start();
-        m_queries[slot]->reset(frame.cmd);
-        m_queries[slot]->writeBeginTimestamp(frame.cmd);
+        m_queries[slot].reset(frame.cmd);
+        m_queries[slot].writeBeginTimestamp(frame.cmd);
 
         // Color + depth to their attachment-optimal layouts. Both are discarded
         // each frame (contents not preserved), so a plain discard-then-clear
@@ -273,7 +272,7 @@ protected:
         // per-condition order would make B0 vs B1 a comparison of sorts, not of
         // binding strategies.
         m_pipeline.bind(handle);
-        m_queries[slot]->beginPipelineStats(frame.cmd); // inside rendering
+        m_queries[slot].beginPipelineStats(frame.cmd); // inside rendering
         int boundMaterial = -1;
         for (uint32_t i = 0; i < m_draws.size(); ++i) {
             const Draw& draw = m_draws[i];
@@ -299,11 +298,11 @@ protected:
             // drawIndirectFirstInstance feature for it.
             vkCmdDrawIndexed(handle, mesh.indexCount, 1, 0, 0, /*firstInstance=*/i);
         }
-        m_queries[slot]->endPipelineStats(frame.cmd); // before end-rendering
+        m_queries[slot].endPipelineStats(frame.cmd); // before end-rendering
 
         vkCmdEndRendering(handle);
 
-        m_queries[slot]->writeEndTimestamp(frame.cmd); // outside rendering
+        m_queries[slot].writeEndTimestamp(frame.cmd); // outside rendering
 
         frame.cmd.transitionImageLayout(frame.image,
                                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -316,8 +315,8 @@ protected:
     // Resolve one slot's queries and (past warm-up) append a CSV row. cpuSubmitMs
     // stays 0: App owns submit, so onRender can only time recording (see NOTE).
     void recordMeasurement(uint32_t slot, uint64_t doneFrame, VkExtent2D extent) {
-        const double gpuMs = m_queries[slot]->resolveGpuMilliseconds();
-        const bench::GpuQueries::PipelineStats stats = m_queries[slot]->resolvePipelineStats();
+        const double gpuMs = m_queries[slot].resolveGpuMilliseconds();
+        const bench::GpuQueries::PipelineStats stats = m_queries[slot].resolvePipelineStats();
         if (doneFrame < WARMUP_FRAMES) {
             return; // discard warm-up frames
         }
@@ -331,7 +330,7 @@ protected:
         r.triangles = stats.inputAssemblyPrimitives;
         r.vertexInvocations = stats.vertexShaderInvocations;
         r.fragmentInvocations = stats.fragmentShaderInvocations;
-        m_reporter->write(r);
+        m_reporter.write(r);
     }
 
 private:
@@ -468,14 +467,13 @@ private:
                                   m_objectData.data(),
                                   m_objectBuffer.size());
 
-        m_frameLayout = render::DescriptorSetLayout::Builder(*m_context)
-                            .binding(0,
-                                     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
-                            .binding(1,
-                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                     VK_SHADER_STAGE_VERTEX_BIT)
-                            .build();
+        m_frameLayout =
+            render::DescriptorSetLayout::Builder(*m_context)
+                .binding(0,
+                         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
+                .binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT)
+                .build();
 
         VkDescriptorBufferInfo objects{m_objectBuffer.handle(), 0, m_objectBuffer.size()};
         for (uint32_t i = 0; i < App::FRAMES_IN_FLIGHT; ++i) {
@@ -499,8 +497,7 @@ private:
         spdlog::info("spirv mesh.vert={} mesh.frag={}", vert.hashHex(), frag.hashHex());
 
         m_pipelineLayout =
-            PipelineLayout::create(*m_context,
-                                   {m_frameLayout.handle(), m_materialLayout.handle()});
+            PipelineLayout::create(*m_context, {m_frameLayout.handle(), m_materialLayout.handle()});
 
         asset::VertexInputDesc vin = asset::standardVertexInput();
         m_pipeline = PipelineBuilder(*m_context)
@@ -569,12 +566,12 @@ private:
     // One GpuQueries per frame-in-flight so a frame's queries are only read after
     // its fence has signalled (see recordMeasurement). Environment dumped once.
     void createBench() {
-        for (auto& q : m_queries) {
-            q.emplace(*m_context);
+        m_queries.reserve(App::FRAMES_IN_FLIGHT);
+        for (uint32_t i = 0; i < App::FRAMES_IN_FLIGHT; ++i) {
+            m_queries.emplace_back(*m_context);
         }
-        m_reporter.emplace("results.csv");
         bench::dumpEnvironmentJson(*m_context, "env.json");
-        if (!m_queries[0]->gpuSupported()) {
+        if (!m_queries[0].gpuSupported()) {
             spdlog::warn("GPU timestamps unsupported on this device; gpuMs will be 0");
         }
     }
@@ -601,10 +598,9 @@ private:
 
     // Bench: measurements start after this many frames (warm-up discarded).
     static constexpr uint64_t WARMUP_FRAMES = 300;
-    std::array<std::optional<bench::GpuQueries>, App::FRAMES_IN_FLIGHT>
-        m_queries; // no default ctor
+    std::vector<bench::GpuQueries> m_queries; // one per frame-in-flight
     std::array<double, App::FRAMES_IN_FLIGHT> m_recordMs{};
-    std::optional<bench::CsvReporter> m_reporter;
+    bench::CsvReporter m_reporter{"results.csv"};
     bench::CpuTimer m_recordTimer;
 
     uint64_t m_frame{0};

@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -38,7 +39,8 @@ Diff compare(const uint8_t* a, const uint8_t* b, size_t pixels, int maxDelta) {
     for (size_t p = 0; p < pixels; ++p) {
         int worst = 0;
         for (size_t c = 0; c < 4; ++c) {
-            const int delta = std::abs(static_cast<int>(a[p * 4 + c]) - static_cast<int>(b[p * 4 + c]));
+            const int delta =
+                std::abs(static_cast<int>(a[p * 4 + c]) - static_cast<int>(b[p * 4 + c]));
             worst = std::max(worst, delta);
         }
         d.maxChannelDelta = std::max(d.maxChannelDelta, worst);
@@ -78,6 +80,19 @@ int selfCheck() {
     return 0;
 }
 
+// A silently-misparsed tolerance would turn every comparison into a PASS, so a
+// bad argument has to be an error, not a 0.
+bool parseNumber(const char* text, double& out) {
+    char* end = nullptr;
+    errno = 0;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end != '\0' || errno == ERANGE) {
+        return false;
+    }
+    out = value;
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -90,8 +105,15 @@ int main(int argc, char** argv) {
                      "       imgdiff --selfcheck\n");
         return 2;
     }
-    const int maxDelta = argc > 3 ? std::atoi(argv[3]) : 1;
-    const double maxRatio = argc > 4 ? std::atof(argv[4]) : 0.0001;
+    double delta = 1.0;
+    double ratioLimit = 0.0001;
+    if ((argc > 3 && !parseNumber(argv[3], delta)) ||
+        (argc > 4 && !parseNumber(argv[4], ratioLimit))) {
+        std::fprintf(stderr, "maxDelta and maxMismatchRatio must be numbers\n");
+        return 2;
+    }
+    const int maxDelta = static_cast<int>(delta);
+    const double maxRatio = ratioLimit;
 
     int wa = 0, ha = 0, wb = 0, hb = 0, channels = 0;
     uint8_t* a = stbi_load(argv[1], &wa, &ha, &channels, 4);

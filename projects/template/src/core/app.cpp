@@ -83,8 +83,11 @@ void App::initWindowAndContext(const std::string& title) {
     // Use the actual drawable size in pixels (may differ from the logical window
     // size on high-DPI displays).
     SDL_GetWindowSizeInPixels(m_window, &m_width, &m_height);
-    m_swapchain = std::make_unique<render::Swapchain>(
-        *m_context, nullptr, m_width, m_height, m_uncappedPresent);
+    m_swapchain = std::make_unique<render::Swapchain>(*m_context,
+                                                      nullptr,
+                                                      m_width,
+                                                      m_height,
+                                                      m_uncappedPresent);
     m_commandPool = std::make_unique<render::CommandPool>(*m_context);
 }
 
@@ -195,7 +198,8 @@ void App::drawFrame() {
     // Capture is appended AFTER the lab's commands, so what lands in the PNG is
     // exactly what would have been presented — no separate render path that
     // could diverge from the measured one.
-    const bool capturing = m_captureFrame >= 0 && m_frameIndex == static_cast<uint64_t>(m_captureFrame);
+    const bool capturing =
+        m_captureFrame >= 0 && m_frameIndex == static_cast<uint64_t>(m_captureFrame);
     if (capturing) {
         const VkDeviceSize bytes =
             VkDeviceSize{frame.extent.width} * frame.extent.height * 4; // B8G8R8A8
@@ -277,8 +281,11 @@ void App::recreateSwapchain() {
 
     // Build the new swapchain from the old one, then release the old.
     auto old = std::move(m_swapchain);
-    m_swapchain = std::make_unique<render::Swapchain>(
-        *m_context, old.get(), m_width, m_height, m_uncappedPresent);
+    m_swapchain = std::make_unique<render::Swapchain>(*m_context,
+                                                      old.get(),
+                                                      m_width,
+                                                      m_height,
+                                                      m_uncappedPresent);
     old.reset();
 
     // Image count may have changed; rebuild the per-image semaphores (GPU is
