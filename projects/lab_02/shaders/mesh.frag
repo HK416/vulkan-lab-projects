@@ -28,7 +28,12 @@ struct Material {
 layout(std430, set = 1, binding = 0) readonly buffer Materials {
     Material materials[];
 };
-layout(set = 1, binding = 2) uniform sampler2D textures[];
+// Separate image and sampler, not combined: the array holds 3 x material-count
+// images, and combined descriptors would each burn a sampler slot — Apple/Metal
+// allows only 16 samplers per stage. One shared sampler is also what the
+// experiment fixes as a control (filtering must not vary per material).
+layout(set = 1, binding = 2) uniform texture2D textures[];
+layout(set = 1, binding = 3) uniform sampler texSampler;
 
 layout(location = 0) out vec4 outColor;
 
@@ -55,9 +60,10 @@ void main() {
     Material m = materials[inMaterial];
     // nonuniformEXT: the index is dynamically uniform per draw today, but it
     // stays correct if a later condition merges draws.
-    vec4 base = texture(textures[nonuniformEXT(m.tex.x)], inUv) * m.baseColorFactor;
+    vec4 base = texture(sampler2D(textures[nonuniformEXT(m.tex.x)], texSampler), inUv) *
+                m.baseColorFactor;
     vec3 albedo = base.rgb;
-    vec2 rm = texture(textures[nonuniformEXT(m.tex.y)], inUv).gb; // G=rough, B=metal
+    vec2 rm = texture(sampler2D(textures[nonuniformEXT(m.tex.y)], texSampler), inUv).gb;
     float roughness = clamp(rm.x * m.mr.y, 0.04, 1.0);
     float metallic = rm.y * m.mr.x;
 
@@ -65,7 +71,7 @@ void main() {
     vec3 N = normalize(inNormal);
     vec3 T = normalize(inTangent.xyz);
     vec3 B = cross(N, T) * inTangent.w;
-    vec3 nTex = texture(textures[nonuniformEXT(m.tex.z)], inUv).xyz * 2.0 - 1.0;
+    vec3 nTex = texture(sampler2D(textures[nonuniformEXT(m.tex.z)], texSampler), inUv).xyz * 2.0 - 1.0;
     N = normalize(mat3(T, B, N) * nTex);
 
     vec3 V = normalize(frame.camPos.xyz - inWorldPos);

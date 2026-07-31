@@ -13,9 +13,11 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -29,6 +31,7 @@
 #include "bench/instrument.h"
 #include "bench/reporter.h"
 #include "core/app.h"
+#include "core/env.h"
 #include "core/vk_check.h"
 #include "render/buffer.h"
 #include "render/command.h"
@@ -55,7 +58,23 @@ using lab::render::PipelineLayout;
 using lab::render::Shader;
 using lab::render::StagingUploader;
 
-const char* MODELS[] = {"assets/DamagedHelmet/DamagedHelmet.gltf"};
+// Model set M. Identical list and order in every lab — k and the material count
+// it implies are experiment controls, not a per-lab choice.
+const char* MODELS[] = {
+    "assets/Avocado/Avocado.gltf",
+    "assets/BoomBox/BoomBox.gltf",
+    "assets/Corset/Corset.gltf",
+    "assets/DamagedHelmet/DamagedHelmet.gltf",
+    "assets/FlightHelmet/FlightHelmet.gltf", // 6 materials / 6 meshes
+    "assets/Lantern/Lantern.gltf",           // 3 meshes
+    "assets/WaterBottle/WaterBottle.gltf",
+};
+constexpr uint32_t MODEL_COUNT = static_cast<uint32_t>(std::size(MODELS)); // k = 7
+
+// Every model is placed at this world size (longest AABB axis). The set spans
+// ~0.07 to ~5 authored units; without this, per-model fragment load would vary
+// by orders of magnitude and the resolution axis would measure nothing.
+constexpr float NORMALIZED_SIZE = 2.0f;
 
 // SPIR-V embedded at build time (glslc -mfmt=c, see CMakeLists).
 const uint32_t MESH_VERT[] =
@@ -78,6 +97,20 @@ struct GpuMaterial {
     GpuImage normal;
     GpuBuffer factors;                    // binding 3: MaterialUbo
     VkDescriptorSet set = VK_NULL_HANDLE; // B0: one set per material
+};
+// Which slice of m_meshes belongs to one model in M, plus the recenter+rescale
+// that puts it on the common size. Instances draw only their own model's meshes.
+struct ModelRange {
+    uint32_t firstMesh = 0;
+    uint32_t meshCount = 0;
+    glm::mat4 normalize{1.0f};
+};
+// One recorded draw. The list is flattened and sorted ONCE at setup; the sort
+// order is an experiment control shared with every other condition.
+struct Draw {
+    uint32_t mesh = 0;
+    int material = -1;
+    glm::mat4 model{1.0f};
 };
 
 // std140-compatible UBO layouts (match the shader blocks exactly).
@@ -219,46 +252,43 @@ protected:
                                 0,
                                 nullptr);
 
-        // A0 × B0 draw loop. k=1 here, so every instance draws MODELS[0]'s meshes
-        // (all of m_meshes). For k>1 you'd index meshes by instance.model; the
-        // loop shape — bind-material-on-change, bind-per-mesh, push model, draw — is
-        // the recording whose cost the A/B axes vary.
+        // A0 × B0 draw loop over the pre-sorted draw list. The loop shape —
+        // bind-material-on-change, bind-per-mesh, push model, draw — is the
+        // recording whose cost the A/B axes vary.
         //
-        // ORDER: instances iterate in generation order. With a single material
-        // that's fine, but the real study must sort the draw list by material (then
-        // mesh) ONCE at setup — a fixed order identical across conditions — or B0
-        // thrashes rebinds and A/B0/B1 stop being comparable (see ../README.md).
+        // ORDER: sorted by material then mesh at setup (see createScene), so B0
+        // rebinds once per material rather than once per draw. That is what a
+        // real renderer does, and every condition uses the identical order — a
+        // per-condition order would make B0 vs B1 a comparison of sorts, not of
+        // binding strategies.
         m_pipeline.bind(handle);
         m_queries[slot]->beginPipelineStats(frame.cmd); // inside rendering
         int boundMaterial = -1;
-        for (const scene::Instance& inst : m_instances) {
-            const PushConstants pc{glm::translate(glm::mat4(1.0f), inst.position) *
-                                   glm::mat4_cast(inst.rotation)};
-
-            for (const GpuMesh& mesh : m_meshes) {
-                if (mesh.material >= 0 && mesh.material != boundMaterial) {
-                    vkCmdBindDescriptorSets(handle,
-                                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            m_pipeline.layout(),
-                                            1,
-                                            1,
-                                            &m_materials[mesh.material].set,
-                                            0,
-                                            nullptr); // B0
-                    boundMaterial = mesh.material;
-                }
-                const VkBuffer vertexBuffer = mesh.vertex.handle();
-                const VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(handle, 0, 1, &vertexBuffer, &offset); // A0
-                vkCmdBindIndexBuffer(handle, mesh.index.handle(), 0, VK_INDEX_TYPE_UINT32);
-                vkCmdPushConstants(handle,
-                                   m_pipeline.layout(),
-                                   VK_SHADER_STAGE_VERTEX_BIT,
-                                   0,
-                                   sizeof(pc),
-                                   &pc);
-                vkCmdDrawIndexed(handle, mesh.indexCount, 1, 0, 0, 0);
+        for (const Draw& draw : m_draws) {
+            const GpuMesh& mesh = m_meshes[draw.mesh];
+            if (draw.material >= 0 && draw.material != boundMaterial) {
+                vkCmdBindDescriptorSets(handle,
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        m_pipeline.layout(),
+                                        1,
+                                        1,
+                                        &m_materials[draw.material].set,
+                                        0,
+                                        nullptr); // B0
+                boundMaterial = draw.material;
             }
+            const VkBuffer vertexBuffer = mesh.vertex.handle();
+            const VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(handle, 0, 1, &vertexBuffer, &offset); // A0
+            vkCmdBindIndexBuffer(handle, mesh.index.handle(), 0, VK_INDEX_TYPE_UINT32);
+            const PushConstants pc{draw.model};
+            vkCmdPushConstants(handle,
+                               m_pipeline.layout(),
+                               VK_SHADER_STAGE_VERTEX_BIT,
+                               0,
+                               sizeof(pc),
+                               &pc);
+            vkCmdDrawIndexed(handle, mesh.indexCount, 1, 0, 0, 0);
         }
         m_queries[slot]->endPipelineStats(frame.cmd); // before end-rendering
 
@@ -296,11 +326,14 @@ protected:
     }
 
 private:
-    // A0: load set M and give each mesh its own vertex/index buffer pair.
+    // A0: load set M and give each mesh its own vertex/index buffer pair, plus
+    // the per-model mesh range and normalizing transform the scene needs.
     void loadModels() {
         StagingUploader up(*m_context);
         for (const char* path : MODELS) {
             asset::CpuModel model = asset::loadModel(path);
+            ModelRange range;
+            range.firstMesh = static_cast<uint32_t>(m_meshes.size());
             // Material indices in a CpuModel are model-local; offset them so they
             // index into the flattened m_materials across the whole set M.
             const int matBase = static_cast<int>(m_materials.size());
@@ -345,6 +378,18 @@ private:
                 gm.material = mesh.material < 0 ? -1 : matBase + mesh.material;
                 m_meshes.push_back(std::move(gm));
             }
+
+            // Recenter on the AABB, then scale the longest axis to
+            // NORMALIZED_SIZE. Applied before the instance transform, so every
+            // model contributes the same silhouette area regardless of how it
+            // was authored.
+            range.meshCount = static_cast<uint32_t>(m_meshes.size()) - range.firstMesh;
+            const glm::vec3 extent = model.max - model.min;
+            const float longest = std::max({extent.x, extent.y, extent.z});
+            const float scale = longest > 0.0f ? NORMALIZED_SIZE / longest : 1.0f;
+            range.normalize = glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
+                              glm::translate(glm::mat4(1.0f), -0.5f * (model.min + model.max));
+            m_models.push_back(range);
         }
         up.flush(); // one blocking submit for all mesh copies
     }
@@ -441,14 +486,16 @@ private:
                          .build();
     }
 
-    // Deterministic instances (dumped to JSON) + a camera loop framing them.
-    // N is small for bring-up; the study sweeps it.
+    // Deterministic instances (dumped to JSON) + a camera loop framing them, then
+    // the flattened, sorted draw list every frame replays.
     void createScene() {
         scene::SceneParams params{};
         params.seed = 42;
-        params.count = 25;     // N
-        params.modelCount = 1; // k = |MODELS|
-        params.spacing = 3.0f; // DamagedHelmet is ~2 units across
+        // N — the object-count axis. LAB_OBJECTS picks a level without a rebuild;
+        // the design sweeps {128, 512, 2048, 8192, 32768}.
+        params.count = static_cast<uint32_t>(lab::core::envInt("LAB_OBJECTS", 128));
+        params.modelCount = MODEL_COUNT; // k
+        params.spacing = 3.0f;           // every model is NORMALIZED_SIZE across
         params.jitter = 0.3f;
         m_instances = scene::generateScene(params);
         scene::dumpSceneJson(m_instances, params, "scene.json");
@@ -458,6 +505,32 @@ private:
         const glm::vec3 half = scene::sceneHalfExtent(m_instances);
         const float span = std::max(half.x, half.z) + 3.0f;
         m_path = scene::makeSweepPath(center, span * 1.5f, span);
+
+        // Flatten instance × its own model's meshes. Transforms are static, so
+        // they are computed once here rather than per frame.
+        for (const scene::Instance& inst : m_instances) {
+            const ModelRange& range = m_models[inst.model];
+            const glm::mat4 model = glm::translate(glm::mat4(1.0f), inst.position) *
+                                    glm::mat4_cast(inst.rotation) * range.normalize;
+            for (uint32_t i = 0; i < range.meshCount; ++i) {
+                const uint32_t mesh = range.firstMesh + i;
+                m_draws.push_back(Draw{mesh, m_meshes[mesh].material, model});
+            }
+        }
+
+        // THE render order, shared by every condition: material then mesh. B0
+        // rebinds once per material instead of once per draw; stable_sort keeps
+        // instance generation order inside a group so the overdraw pattern stays
+        // deterministic. Sorting here (not per frame) keeps it out of cpuRecordMs.
+        std::stable_sort(m_draws.begin(), m_draws.end(), [](const Draw& a, const Draw& b) {
+            return std::tie(a.material, a.mesh) < std::tie(b.material, b.mesh);
+        });
+        spdlog::info("scene: N={} k={} meshes={} materials={} draws={}",
+                     m_instances.size(),
+                     MODEL_COUNT,
+                     m_meshes.size(),
+                     m_materials.size(),
+                     m_draws.size());
     }
 
     // One GpuQueries per frame-in-flight so a frame's queries are only read after
@@ -476,6 +549,7 @@ private:
     // Declaration order matters for destruction (reverse): pipeline before its
     // layout, sets before their pool. All borrow the base App's Context.
     std::vector<GpuMesh> m_meshes;
+    std::vector<ModelRange> m_models; // index-aligned with MODELS
     std::vector<GpuMaterial> m_materials;
     VkSampler m_sampler{VK_NULL_HANDLE}; // raw; destroyed in ~IndirectLab
     render::DescriptorSetLayout m_materialLayout;
@@ -487,6 +561,7 @@ private:
     GraphicsPipeline m_pipeline;
 
     std::vector<scene::Instance> m_instances;
+    std::vector<Draw> m_draws; // flattened + sorted once; replayed every frame
     scene::CameraPath m_path;
 
     // Bench: measurements start after this many frames (warm-up discarded).

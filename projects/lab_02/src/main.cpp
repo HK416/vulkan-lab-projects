@@ -15,9 +15,11 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -31,6 +33,7 @@
 #include "bench/instrument.h"
 #include "bench/reporter.h"
 #include "core/app.h"
+#include "core/env.h"
 #include "core/vk_check.h"
 #include "render/buffer.h"
 #include "render/command.h"
@@ -57,7 +60,23 @@ using lab::render::PipelineLayout;
 using lab::render::Shader;
 using lab::render::StagingUploader;
 
-const char* MODELS[] = {"assets/DamagedHelmet/DamagedHelmet.gltf"};
+// Model set M. Identical list and order in every lab — k and the material count
+// it implies are experiment controls, not a per-lab choice.
+const char* MODELS[] = {
+    "assets/Avocado/Avocado.gltf",
+    "assets/BoomBox/BoomBox.gltf",
+    "assets/Corset/Corset.gltf",
+    "assets/DamagedHelmet/DamagedHelmet.gltf",
+    "assets/FlightHelmet/FlightHelmet.gltf", // 6 materials / 6 meshes
+    "assets/Lantern/Lantern.gltf",           // 3 meshes
+    "assets/WaterBottle/WaterBottle.gltf",
+};
+constexpr uint32_t MODEL_COUNT = static_cast<uint32_t>(std::size(MODELS)); // k = 7
+
+// Every model is placed at this world size (longest AABB axis). The set spans
+// ~0.07 to ~5 authored units; without this, per-model fragment load would vary
+// by orders of magnitude and the resolution axis would measure nothing.
+constexpr float NORMALIZED_SIZE = 2.0f;
 
 // SPIR-V embedded at build time (glslc -mfmt=c, see CMakeLists).
 const uint32_t MESH_VERT[] =
@@ -79,10 +98,20 @@ struct GpuMaterial {
     GpuImage metallicRoughness; //   views go into the single bindless texture
     GpuImage normal;            //   array, the factors into the materials SSBO.
 };
+// Which slice of m_meshes belongs to one model in M, plus the recenter+rescale
+// that puts it on the common size. Instances draw only their own model's meshes.
+struct ModelRange {
+    uint32_t firstMesh = 0;
+    uint32_t meshCount = 0;
+    glm::mat4 normalize{1.0f};
+};
 // One recorded draw. Its index in m_draws is passed as firstInstance and is the
-// shader's index into the objects SSBO (the fixed bindless index path).
+// shader's index into the objects SSBO (the fixed bindless index path), so the
+// list must be sorted BEFORE the objects buffer is built from it.
 struct Draw {
     uint32_t mesh = 0;
+    int material = -1;
+    glm::mat4 model{1.0f};
 };
 
 // std140-compatible UBO layout (matches the shader block exactly).
@@ -240,9 +269,9 @@ protected:
                                 0,
                                 nullptr);
 
-        // A0 × B1 draw loop. m_draws is flattened at setup in lab_01's exact
-        // order (instance-major, mesh-minor) so the overdraw pattern — and hence
-        // pixel output and fragment count — matches the baseline.
+        // A0 × B1 draw loop. m_draws is flattened and sorted (material, mesh) at
+        // setup — the same order lab_01 uses, so the overdraw pattern and hence
+        // pixel output and fragment count match the baseline.
         //
         // firstInstance = draw index is the FIXED bindless index path: the vertex
         // shader reads objects[gl_BaseInstance] for both transform and material.
@@ -294,12 +323,16 @@ protected:
     }
 
 private:
-    // A0: load set M and give each mesh its own vertex/index buffer pair.
-    // Unchanged from lab_01 — the geometry axis is not what this lab varies.
+    // A0: load set M and give each mesh its own vertex/index buffer pair, plus
+    // the per-model mesh range and normalizing transform the scene needs.
+    // Geometry handling is unchanged from lab_01 — the A axis is not what this
+    // lab varies.
     void loadModels() {
         StagingUploader up(*m_context);
         for (const char* path : MODELS) {
             asset::CpuModel model = asset::loadModel(path);
+            ModelRange range;
+            range.firstMesh = static_cast<uint32_t>(m_meshes.size());
             // Material indices in a CpuModel are model-local; offset them so they
             // index into the flattened m_materials across the whole set M.
             const int matBase = static_cast<int>(m_materials.size());
@@ -345,6 +378,18 @@ private:
                 gm.material = mesh.material < 0 ? -1 : matBase + mesh.material;
                 m_meshes.push_back(std::move(gm));
             }
+
+            // Recenter on the AABB, then scale the longest axis to
+            // NORMALIZED_SIZE. Applied before the instance transform, so every
+            // model contributes the same silhouette area regardless of how it
+            // was authored.
+            range.meshCount = static_cast<uint32_t>(m_meshes.size()) - range.firstMesh;
+            const glm::vec3 extent = model.max - model.min;
+            const float longest = std::max({extent.x, extent.y, extent.z});
+            const float scale = longest > 0.0f ? NORMALIZED_SIZE / longest : 1.0f;
+            range.normalize = glm::scale(glm::mat4(1.0f), glm::vec3(scale)) *
+                              glm::translate(glm::mat4(1.0f), -0.5f * (model.min + model.max));
+            m_models.push_back(range);
         }
         up.flush(); // one blocking submit for all mesh copies
     }
@@ -354,9 +399,11 @@ private:
     void createScene() {
         scene::SceneParams params{};
         params.seed = 42;
-        params.count = 25;     // N
-        params.modelCount = 1; // k = |MODELS|
-        params.spacing = 3.0f; // DamagedHelmet is ~2 units across
+        // N — the object-count axis. LAB_OBJECTS picks a level without a rebuild;
+        // the design sweeps {128, 512, 2048, 8192, 32768}.
+        params.count = static_cast<uint32_t>(lab::core::envInt("LAB_OBJECTS", 128));
+        params.modelCount = MODEL_COUNT; // k
+        params.spacing = 3.0f;           // every model is NORMALIZED_SIZE across
         params.jitter = 0.3f;
         m_instances = scene::generateScene(params);
         scene::dumpSceneJson(m_instances, params, "scene.json");
@@ -367,23 +414,42 @@ private:
         const float span = std::max(half.x, half.z) + 3.0f;
         m_path = scene::makeSweepPath(center, span * 1.5f, span);
 
-        // Flatten instance × mesh into the draw list, in lab_01's iteration order.
-        // Transforms are static, so the per-object data is built ONCE here instead
-        // of per frame — with B1 there is no per-draw push constant to write.
-        //
-        // ponytail: k=1, so every instance draws all of m_meshes. For k>1 index
-        // meshes by inst.model, exactly as lab_01 would.
+        // Flatten instance × its own model's meshes. Transforms are static, so
+        // they are computed once here rather than per frame — with B1 there is no
+        // per-draw push constant to write anyway.
         for (const scene::Instance& inst : m_instances) {
-            const glm::mat4 model =
-                glm::translate(glm::mat4(1.0f), inst.position) * glm::mat4_cast(inst.rotation);
-            for (uint32_t mi = 0; mi < m_meshes.size(); ++mi) {
-                ObjectGpu obj;
-                obj.model = model;
-                obj.material.x = static_cast<uint32_t>(std::max(m_meshes[mi].material, 0));
-                m_objectData.push_back(obj);
-                m_draws.push_back(Draw{mi});
+            const ModelRange& range = m_models[inst.model];
+            const glm::mat4 model = glm::translate(glm::mat4(1.0f), inst.position) *
+                                    glm::mat4_cast(inst.rotation) * range.normalize;
+            for (uint32_t i = 0; i < range.meshCount; ++i) {
+                const uint32_t mesh = range.firstMesh + i;
+                m_draws.push_back(Draw{mesh, m_meshes[mesh].material, model});
             }
         }
+
+        // THE render order, shared by every condition: material then mesh. B1
+        // gains nothing from it (nothing rebinds), but B0 does, so the order has
+        // to be identical or lab_01 vs lab_02 compares sorts instead of binding
+        // strategies. stable_sort keeps instance generation order inside a group,
+        // fixing the overdraw pattern.
+        std::stable_sort(m_draws.begin(), m_draws.end(), [](const Draw& a, const Draw& b) {
+            return std::tie(a.material, a.mesh) < std::tie(b.material, b.mesh);
+        });
+
+        // objects[] is indexed by draw index, so it is built AFTER the sort.
+        m_objectData.reserve(m_draws.size());
+        for (const Draw& draw : m_draws) {
+            ObjectGpu obj;
+            obj.model = draw.model;
+            obj.material.x = static_cast<uint32_t>(std::max(draw.material, 0));
+            m_objectData.push_back(obj);
+        }
+        spdlog::info("scene: N={} k={} meshes={} materials={} draws={}",
+                     m_instances.size(),
+                     MODEL_COUNT,
+                     m_meshes.size(),
+                     m_materials.size(),
+                     m_draws.size());
     }
 
     // B1: ONE descriptor set (set 1) holding every material — a texture array
@@ -401,7 +467,12 @@ private:
         si.maxLod = VK_LOD_CLAMP_NONE;
         VK_CHECK(vkCreateSampler(m_context->getDevice(), &si, nullptr, &m_sampler));
 
-        constexpr VkDescriptorType SAMPLER = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        // Separate image and sampler descriptors. Combined ones would consume a
+        // sampler slot per texture, and Apple/Metal caps per-stage samplers at 16
+        // — the array is 3 x material count. One shared sampler is also the
+        // experiment's fixed filtering control.
+        constexpr VkDescriptorType IMAGE = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        constexpr VkDescriptorType SAMPLER = VK_DESCRIPTOR_TYPE_SAMPLER;
         constexpr VkDescriptorType SSBO = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         const uint32_t textureCount = 3 * static_cast<uint32_t>(m_materials.size());
 
@@ -428,47 +499,52 @@ private:
         m_bindlessLayout = render::DescriptorSetLayout::Builder(*m_context)
                                .binding(0, SSBO, VK_SHADER_STAGE_FRAGMENT_BIT)
                                .binding(1, SSBO, VK_SHADER_STAGE_VERTEX_BIT)
-                               .binding(2, SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, textureCount)
+                               .binding(2, IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT, textureCount)
+                               .binding(3, SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
                                .build();
 
         // Pool covers the one bindless set plus the per-frame UBO sets allocated
         // by createFrameResources().
         std::vector<VkDescriptorPoolSize> sizes = {
-            {SAMPLER, textureCount},
+            {IMAGE, textureCount},
+            {SAMPLER, 1},
             {SSBO, 2},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, App::FRAMES_IN_FLIGHT}};
         m_pool = render::DescriptorPool::create(*m_context, 1 + App::FRAMES_IN_FLIGHT, sizes);
         m_bindlessSet = m_pool.allocate(m_bindlessLayout.handle());
 
-        const auto image = [&](VkImageView view) {
+        const auto image = [](VkImageView view) {
             VkDescriptorImageInfo info{};
-            info.sampler = m_sampler;
-            info.imageView = view;
+            info.imageView = view; // the sampler is its own descriptor now
             info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             return info;
         };
+        VkDescriptorImageInfo samplerInfo{};
+        samplerInfo.sampler = m_sampler;
+
         VkDescriptorBufferInfo materials{m_materialBuffer.handle(), 0, m_materialBuffer.size()};
         VkDescriptorBufferInfo objects{m_objectBuffer.handle(), 0, m_objectBuffer.size()};
         render::DescriptorWriter writer(*m_context);
         writer.writeBuffer(m_bindlessSet, 0, SSBO, materials)
-            .writeBuffer(m_bindlessSet, 1, SSBO, objects);
+            .writeBuffer(m_bindlessSet, 1, SSBO, objects)
+            .writeImage(m_bindlessSet, 3, SAMPLER, samplerInfo);
         for (uint32_t i = 0; i < m_materials.size(); ++i) {
             // Three consecutive array elements per material — the layout that
             // MaterialGpu::tex was built against in loadModels().
             writer
                 .writeImage(m_bindlessSet,
                             2,
-                            SAMPLER,
+                            IMAGE,
                             image(m_materials[i].baseColor.view()),
                             3 * i)
                 .writeImage(m_bindlessSet,
                             2,
-                            SAMPLER,
+                            IMAGE,
                             image(m_materials[i].metallicRoughness.view()),
                             3 * i + 1)
                 .writeImage(m_bindlessSet,
                             2,
-                            SAMPLER,
+                            IMAGE,
                             image(m_materials[i].normal.view()),
                             3 * i + 2);
         }
@@ -531,6 +607,7 @@ private:
     // Declaration order matters for destruction (reverse): pipeline before its
     // layout, sets before their pool. All borrow the base App's Context.
     std::vector<GpuMesh> m_meshes;
+    std::vector<ModelRange> m_models; // index-aligned with MODELS
     std::vector<GpuMaterial> m_materials;
     VkSampler m_sampler{VK_NULL_HANDLE}; // raw; destroyed in ~IndirectLab
     std::vector<MaterialGpu> m_materialData;
