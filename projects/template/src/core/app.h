@@ -17,6 +17,7 @@ namespace lab::render {
 class Context;
 class CommandBuffer;
 class CommandPool;
+class GpuBuffer;
 class Swapchain;
 class BinarySemaphore;
 class Fence;
@@ -94,6 +95,18 @@ private:
     // be using the semaphore, so it cannot be tied to the frame-in-flight slot.
     std::vector<std::unique_ptr<render::BinarySemaphore>> m_renderFinished;
     uint32_t m_frame{0};
+
+    // Deterministic run control, read from the environment so no lab has to
+    // plumb argv (a sweep driver is a shell script setting these):
+    //   LAB_FRAMES=N       quit after N rendered frames (unset/0 = until closed)
+    //   LAB_CAPTURE=K      dump frame K (same index the labs count) to a PNG
+    //   LAB_CAPTURE_FILE=p where to write it (default "capture.png")
+    // A run is only comparable to another if both used the same LAB_CAPTURE.
+    uint64_t m_frameIndex{0};
+    uint64_t m_maxFrames{0};
+    int64_t m_captureFrame{-1};
+    std::string m_captureFile;
+    std::unique_ptr<render::GpuBuffer> m_captureBuffer;
 };
 
 } // namespace lab::core

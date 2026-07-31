@@ -1,5 +1,7 @@
 #include "core/app.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <vector>
 
@@ -7,13 +9,34 @@
 #include <SDL3/SDL_vulkan.h>
 #include <spdlog/spdlog.h>
 
+#include "bench/capture.h"
 #include "core/vk_check.h"
+#include "render/buffer.h"
 #include "render/command.h"
 #include "render/context.h"
 #include "render/swapchain.h"
 #include "render/sync.h"
 
 namespace lab::core {
+namespace {
+
+// Environment overrides (see App's member docs). Absent or unparseable = absent;
+// a typo'd LAB_FRAMES must not silently truncate a benchmark run, so anything
+// that is not a plain number is reported.
+int64_t envInt(const char* name, int64_t fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    try {
+        return std::stoll(raw);
+    } catch (const std::exception&) {
+        spdlog::warn("{}='{}' is not a number; ignoring", name, raw);
+        return fallback;
+    }
+}
+
+} // namespace
 
 App::App(const std::string& title,
          int width,
@@ -21,6 +44,15 @@ App::App(const std::string& title,
          const render::DeviceFeatures& features,
          bool uncappedPresent)
     : m_width(width), m_height(height), m_features(features), m_uncappedPresent(uncappedPresent) {
+    m_maxFrames = static_cast<uint64_t>(std::max<int64_t>(0, envInt("LAB_FRAMES", 0)));
+    m_captureFrame = envInt("LAB_CAPTURE", -1);
+    const char* file = std::getenv("LAB_CAPTURE_FILE");
+    m_captureFile = (file != nullptr && *file != '\0') ? file : "capture.png";
+    if (m_captureFrame >= 0 && m_maxFrames != 0 &&
+        static_cast<uint64_t>(m_captureFrame) >= m_maxFrames) {
+        throw std::runtime_error("LAB_CAPTURE frame is never reached with this LAB_FRAMES");
+    }
+
     try {
         initWindowAndContext(title);
         initFrameSync();
@@ -112,6 +144,7 @@ App::~App() {
     for (auto& f : m_inFlight) {
         f.reset();
     }
+    m_captureBuffer.reset();
     m_commandPool.reset();
     m_swapchain.reset();
     m_context.reset();
@@ -134,6 +167,11 @@ void App::run() {
             }
         }
         drawFrame();
+        // Frame-count limit, not a wall-clock one: a benchmark run must cover the
+        // same frames (hence the same camera path) every time.
+        if (m_maxFrames != 0 && m_frameIndex >= m_maxFrames) {
+            running = false;
+        }
     }
 
     // Drain outstanding GPU work before teardown.
@@ -172,6 +210,20 @@ void App::drawFrame() {
                        m_swapchain->getDepthImageView(),
                        m_swapchain->getExtent()};
     onRender(frame);
+
+    // Capture is appended AFTER the lab's commands, so what lands in the PNG is
+    // exactly what would have been presented — no separate render path that
+    // could diverge from the measured one.
+    const bool capturing = m_captureFrame >= 0 && m_frameIndex == static_cast<uint64_t>(m_captureFrame);
+    if (capturing) {
+        const VkDeviceSize bytes =
+            VkDeviceSize{frame.extent.width} * frame.extent.height * 4; // B8G8R8A8
+        m_captureBuffer = std::make_unique<render::GpuBuffer>(
+            render::GpuBuffer::createHostVisible(*m_context,
+                                                 bytes,
+                                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT));
+        bench::recordCapture(cmd.getHandle(), frame.image, frame.extent, m_captureBuffer->handle());
+    }
 
     cmd.end();
 
@@ -217,7 +269,20 @@ void App::drawFrame() {
         recreateSwapchain();
     }
 
+    if (capturing) {
+        // One blocking wait on a single frame of a run whose measurements are
+        // discarded anyway — the capture run is not the timing run.
+        fence.wait();
+        bench::writePngBgra(m_captureFile,
+                            frame.extent.width,
+                            frame.extent.height,
+                            m_captureBuffer->mapped());
+        spdlog::info("captured frame {} to {}", m_frameIndex, m_captureFile);
+        m_captureBuffer.reset();
+    }
+
     m_frame = (m_frame + 1) % FRAMES_IN_FLIGHT;
+    ++m_frameIndex;
 }
 
 void App::recreateSwapchain() {

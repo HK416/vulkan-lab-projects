@@ -102,6 +102,14 @@ void Swapchain::createSwapchain(Swapchain* oldSwapchain, int width, int height, 
     info.imageExtent = m_swapchainExtent;
     info.imageArrayLayers = 1;
     info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // TRANSFER_SRC is what makes frame capture (the pixel-equivalence check)
+    // possible. Universally supported in practice, but it is a surface
+    // capability, so ask rather than assume.
+    if (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) {
+        info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    } else {
+        spdlog::warn("surface cannot be a transfer source; LAB_CAPTURE will not work");
+    }
     info.preTransform = caps.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     info.presentMode = choosePresentMode(physicalDevice, surface, uncappedPresent);
