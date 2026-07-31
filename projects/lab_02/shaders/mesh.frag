@@ -32,8 +32,8 @@ layout(std430, set = 1, binding = 0) readonly buffer Materials {
 // images, and combined descriptors would each burn a sampler slot — Apple/Metal
 // allows only 16 samplers per stage. One shared sampler is also what the
 // experiment fixes as a control (filtering must not vary per material).
-layout(set = 1, binding = 2) uniform texture2D textures[];
-layout(set = 1, binding = 3) uniform sampler texSampler;
+layout(set = 1, binding = 1) uniform texture2D textures[];
+layout(set = 1, binding = 2) uniform sampler texSampler;
 
 layout(location = 0) out vec4 outColor;
 

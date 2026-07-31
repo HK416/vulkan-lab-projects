@@ -21,13 +21,16 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4 ambient;    // rgb
 } frame;
 
-// set 1 = bindless (B1), bound once for the whole frame. B0's push-constant
-// model matrix moves in here: with multi-draw there is no per-draw push point.
+// Per-object data lives in set 0 next to the frame data, NOT in the material set:
+// it is the same in every condition, so this vertex shader is byte-identical for
+// A0-A3 x B0/B1 and the SPIR-V hash stays fixed across the series. The model
+// matrix has to live here rather than in a push constant because multi-draw has
+// no per-draw push point.
 struct Object {
     mat4 model;
     uvec4 material; // x = index into materials[], yzw unused (std430 padding)
 };
-layout(std430, set = 1, binding = 1) readonly buffer Objects {
+layout(std430, set = 0, binding = 1) readonly buffer Objects {
     Object objects[];
 };
 

@@ -23,7 +23,7 @@ template를 A0 × B1 전략에 배선한다.
 |---|---|---|
 | 머티리얼 텍스처 | set 1 × 머티리얼 수, 머티리얼 바뀔 때 `vkCmdBindDescriptorSets` | 단일 `sampler2D textures[]` 배열, **리바인드 0회** |
 | 머티리얼 상수 | 머티리얼당 UBO | `materials[]` SSBO 1개 |
-| 오브젝트 변환 | push constant (`mat4 model`) | `objects[]` SSBO (setup에서 1회 빌드) |
+| 오브젝트 변환 | 동일 (`objects[]` SSBO) | 동일 — B축이 아니다 |
 | 인덱스 전달 | 없음(바인딩이 곧 상태) | `firstInstance` → `gl_BaseInstanceARB` |
 | 드로우 루프 내 명령 | bind set(조건부) + bind VB/IB + push + draw | bind VB/IB + draw |
 
@@ -46,10 +46,10 @@ IMMEDIATE 프레젠트·라이팅 수식은 lab_01과 **바이트 단위로 동�
   유일한 경로**다. indirect 커맨드(A1/A2/A3)도 `firstInstance` 필드를 실어 나르므로
   셰이더 소스가 조건마다 갈리지 않고, 따라서 SPIR-V 해시가 시리즈 내내 고정된다.
   (A3에서 `gl_DrawID`를 쓰면 A0/A2용 셰이더가 따로 필요해진다.)
-- 그 대가로 `model` 행렬이 push constant에서 SSBO로 이동한다. multi-draw(A3)에는
-  드로우 사이 push 지점이 없으므로 선택의 여지가 없다. **B1의 CPU 레코딩에서
-  per-object 행렬 계산이 사라진다는 점을 해석 시 반드시 기록할 것** — 이건 B1의
-  이득 중 하나이지 측정 오류가 아니다.
+- 그 대가로 `model` 행렬이 push constant가 아니라 SSBO에 놓인다. multi-draw(A3)에는
+  드로우 사이 push 지점이 없으므로 선택의 여지가 없다. **이 비용은 lab_01을 포함한
+  모든 조건이 동일하게 치른다** — lab_03(A1×B0)이 생기면서 lab_01도 같은 경로로
+  맞췄다. 따라서 B0 vs B1 델타에 변환 경로 차이는 섞이지 않는다.
 - 필요 feature: `descriptorIndexing`, `shaderDrawParameters`. 둘 중 하나라도
   미지원이면 생성자가 즉시 throw한다(조용히 다른 조건을 측정하지 않기 위해).
   A1~A3로 갈 때 `drawIndirectFirstInstance`가 추가로 필요하다.
@@ -59,11 +59,12 @@ IMMEDIATE 프레젠트·라이팅 수식은 lab_01과 **바이트 단위로 동�
 ```
 set 0 (프레임당 1회 바인딩, frame-in-flight마다 1개)
   binding 0  UBO      Frame { viewProj, camPos, lightDir, lightColor, ambient }
+  binding 1  SSBO     Object[] { model(mat4), material(uvec4) }        vert
 
 set 1 (전체 실행 중 1회 바인딩, 단 하나)
-  binding 0  SSBO     Material[] { baseColorFactor, mr, tex(uvec4) }   frag
-  binding 1  SSBO     Object[]   { model(mat4), material(uvec4) }      vert
-  binding 2  sampler2D textures[3 × 머티리얼 수]                        frag
+  binding 0  SSBO      Material[] { baseColorFactor, mr, tex(uvec4) }  frag
+  binding 1  texture2D textures[3 × 머티리얼 수]                        frag
+  binding 2  sampler    공유 샘플러 1개                                  frag
 ```
 
 - 텍스처 배열은 **정확한 크기로 할당**(`PARTIALLY_BOUND`/`UPDATE_AFTER_BIND` 없음).
@@ -142,7 +143,7 @@ already lives in `template`; lab_02 is a single `main.cpp` wiring it into A0 × 
 |---|---|---|
 | Material textures | one set 1 per material, `vkCmdBindDescriptorSets` on change | one `sampler2D textures[]` array, **zero rebinds** |
 | Material constants | one UBO per material | a single `materials[]` SSBO |
-| Object transform | push constant (`mat4 model`) | `objects[]` SSBO, built once at setup |
+| Object transform | same (`objects[]` SSBO) | same — not part of the B axis |
 | Index delivery | none (binding *is* the state) | `firstInstance` → `gl_BaseInstanceARB` |
 | Commands in the draw loop | bind set (conditional) + bind VB/IB + push + draw | bind VB/IB + draw |
 
@@ -167,10 +168,11 @@ draw i → vkCmdDrawIndexed(..., firstInstance = i)
   field too, so the shader source never forks and the SPIR-V hash stays fixed
   across the series. (Using `gl_DrawID` for A3 would require a second shader for
   A0/A2.)
-- The cost is that `model` moves from a push constant into the SSBO. Multi-draw
-  (A3) has no per-draw push point, so this is not a choice. **Record that B1's CPU
-  recording therefore loses lab_01's per-object matrix multiply** — that is part
-  of what B1 buys, not a measurement error.
+- The cost is that `model` lives in the SSBO rather than a push constant.
+  Multi-draw (A3) has no per-draw push point, so this is not a choice. **Every
+  condition pays it equally, lab_01 included** — lab_01 was moved onto the same
+  path when lab_03 (A1×B0) arrived. So the B0 vs B1 delta carries no transform-path
+  difference.
 - Required features: `descriptorIndexing`, `shaderDrawParameters`. The constructor
   throws if either is missing, rather than quietly measuring a different condition.
   A1–A3 will additionally need `drawIndirectFirstInstance`.
@@ -180,11 +182,12 @@ draw i → vkCmdDrawIndexed(..., firstInstance = i)
 ```
 set 0 (bound once per frame, one per frame-in-flight)
   binding 0  UBO      Frame { viewProj, camPos, lightDir, lightColor, ambient }
+  binding 1  SSBO     Object[] { model(mat4), material(uvec4) }        vert
 
 set 1 (bound once for the whole run; there is exactly one)
-  binding 0  SSBO     Material[] { baseColorFactor, mr, tex(uvec4) }   frag
-  binding 1  SSBO     Object[]   { model(mat4), material(uvec4) }      vert
-  binding 2  sampler2D textures[3 × material count]                    frag
+  binding 0  SSBO      Material[] { baseColorFactor, mr, tex(uvec4) }  frag
+  binding 1  texture2D textures[3 × material count]                    frag
+  binding 2  sampler    one shared sampler                              frag
 ```
 
 - The texture array is **exactly sized** — no `PARTIALLY_BOUND` /

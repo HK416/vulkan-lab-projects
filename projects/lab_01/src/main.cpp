@@ -125,8 +125,14 @@ struct MaterialUbo {
     glm::vec4 baseColorFactor{1.0f};
     glm::vec4 mr{1.0f}; // x = metallic, y = roughness
 };
-struct PushConstants {
-    glm::mat4 model{1.0f}; // per object; viewProj lives in the frame UBO
+// std430 storage-buffer layout, byte-identical to lab_02/lab_03's. The model
+// matrix lives here rather than in a push constant because the index path is a
+// fixed control across the whole series (design section 3): the indirect
+// conditions have no per-draw push point, and A0 vs A1 would otherwise compare
+// the transform path as well as the draw technique.
+struct ObjectGpu {
+    glm::mat4 model{1.0f};
+    glm::uvec4 material{0, 0, 0, 0}; // x = index into materials[]; unused under B0
 };
 
 class IndirectLab : public App {
@@ -135,18 +141,21 @@ public:
         : App("lab_01 - indirect rendering",
               1280,
               720,
-              DeviceFeatures{.multiDrawIndirect = true,
-                             .drawIndirectCount = true,
-                             .descriptorIndexing = true,
-                             .shaderDrawParameters = true},
+              // Only what A0 × B0 needs (design section 7): gl_BaseInstance to
+              // read the object index. No indirect draws, no descriptorIndexing.
+              DeviceFeatures{.shaderDrawParameters = true},
               /*uncappedPresent=*/true) { // no vsync — GPU time must be unclamped
 
-        // Order matters: layout before pipeline, geometry+materials before draw.
+        if (!m_context->enabledFeatures().shaderDrawParameters) {
+            throw std::runtime_error("index path needs shaderDrawParameters (gl_BaseInstance)");
+        }
+
+        // Order matters: scene before the object SSBO, layouts before pipeline.
         loadModels();
-        createMaterials();      // B0 material sets (set 1)
-        createFrameResources(); // per-frame camera/light UBO (set 0)
-        createPipeline();
         createScene();
+        createMaterials();      // B0 material sets (set 1)
+        createFrameResources(); // set 0: frame UBO + objects SSBO
+        createPipeline();
         createBench();
     }
 
@@ -253,8 +262,10 @@ protected:
                                 nullptr);
 
         // A0 × B0 draw loop over the pre-sorted draw list. The loop shape —
-        // bind-material-on-change, bind-per-mesh, push model, draw — is the
-        // recording whose cost the A/B axes vary.
+        // bind-material-on-change, bind-per-mesh, one draw call per object — is
+        // the recording whose cost the A/B axes vary. lab_03 (A1) records the
+        // identical shaders and the identical order; only this loop differs, so
+        // the pair isolates plain draws from per-mesh indirect.
         //
         // ORDER: sorted by material then mesh at setup (see createScene), so B0
         // rebinds once per material rather than once per draw. That is what a
@@ -264,7 +275,8 @@ protected:
         m_pipeline.bind(handle);
         m_queries[slot]->beginPipelineStats(frame.cmd); // inside rendering
         int boundMaterial = -1;
-        for (const Draw& draw : m_draws) {
+        for (uint32_t i = 0; i < m_draws.size(); ++i) {
+            const Draw& draw = m_draws[i];
             const GpuMesh& mesh = m_meshes[draw.mesh];
             if (draw.material >= 0 && draw.material != boundMaterial) {
                 vkCmdBindDescriptorSets(handle,
@@ -281,14 +293,11 @@ protected:
             const VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(handle, 0, 1, &vertexBuffer, &offset); // A0
             vkCmdBindIndexBuffer(handle, mesh.index.handle(), 0, VK_INDEX_TYPE_UINT32);
-            const PushConstants pc{draw.model};
-            vkCmdPushConstants(handle,
-                               m_pipeline.layout(),
-                               VK_SHADER_STAGE_VERTEX_BIT,
-                               0,
-                               sizeof(pc),
-                               &pc);
-            vkCmdDrawIndexed(handle, mesh.indexCount, 1, 0, 0, 0);
+            // firstInstance = draw index is the fixed index path: the vertex
+            // shader reads objects[gl_BaseInstance]. Plain draws may always carry
+            // a non-zero firstInstance; only the indirect conditions need the
+            // drawIndirectFirstInstance feature for it.
+            vkCmdDrawIndexed(handle, mesh.indexCount, 1, 0, 0, /*firstInstance=*/i);
         }
         m_queries[slot]->endPipelineStats(frame.cmd); // before end-rendering
 
@@ -422,7 +431,8 @@ private:
         const uint32_t mats = static_cast<uint32_t>(m_materials.size());
         std::vector<VkDescriptorPoolSize> sizes = {
             {SAMPLER, 3 * mats},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, mats + App::FRAMES_IN_FLIGHT}};
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, mats + App::FRAMES_IN_FLIGHT},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, App::FRAMES_IN_FLIGHT}};
         m_pool = render::DescriptorPool::create(*m_context, mats + App::FRAMES_IN_FLIGHT, sizes);
 
         for (GpuMaterial& mat : m_materials) {
@@ -444,15 +454,30 @@ private:
         }
     }
 
-    // set 0: per-frame camera + light UBO, one buffer/set per frame-in-flight so
-    // the CPU can write the next frame while the GPU reads the current one.
+    // set 0: per-frame camera + light UBO (one buffer/set per frame-in-flight, so
+    // the CPU can write the next frame while the GPU reads the current one) plus
+    // the static objects SSBO. The objects buffer belongs here — not in the
+    // material set — because it is identical in every condition, which is what
+    // keeps the vertex shader byte-identical across A0-A3 x B0/B1.
     void createFrameResources() {
+        m_objectBuffer = GpuBuffer::createDeviceLocal(*m_context,
+                                                      m_objectData.size() * sizeof(ObjectGpu),
+                                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        render::uploadDeviceLocal(*m_context,
+                                  m_objectBuffer,
+                                  m_objectData.data(),
+                                  m_objectBuffer.size());
+
         m_frameLayout = render::DescriptorSetLayout::Builder(*m_context)
                             .binding(0,
                                      VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
+                            .binding(1,
+                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                     VK_SHADER_STAGE_VERTEX_BIT)
                             .build();
 
+        VkDescriptorBufferInfo objects{m_objectBuffer.handle(), 0, m_objectBuffer.size()};
         for (uint32_t i = 0; i < App::FRAMES_IN_FLIGHT; ++i) {
             m_frameUbo[i] = GpuBuffer::createHostVisible(*m_context,
                                                          sizeof(FrameUbo),
@@ -461,22 +486,21 @@ private:
             VkDescriptorBufferInfo info{m_frameUbo[i].handle(), 0, sizeof(FrameUbo)};
             render::DescriptorWriter(*m_context)
                 .writeBuffer(m_frameSet[i], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, info)
+                .writeBuffer(m_frameSet[i], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, objects)
                 .flush();
         }
     }
 
-    // Pipeline: set 0 = frame UBO, set 1 = material; per-object model push constant.
+    // Pipeline: set 0 = frame UBO + objects, set 1 = material. No push constants
+    // — log the SPIR-V hashes so lab_03 can be shown to run identical shaders.
     void createPipeline() {
         Shader vert = Shader::fromSpirv(*m_context, MESH_VERT, sizeof(MESH_VERT));
         Shader frag = Shader::fromSpirv(*m_context, MESH_FRAG, sizeof(MESH_FRAG));
+        spdlog::info("spirv mesh.vert={} mesh.frag={}", vert.hashHex(), frag.hashHex());
 
-        VkPushConstantRange pcRange{};
-        pcRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        pcRange.size = sizeof(PushConstants);
         m_pipelineLayout =
             PipelineLayout::create(*m_context,
-                                   {m_frameLayout.handle(), m_materialLayout.handle()},
-                                   {pcRange});
+                                   {m_frameLayout.handle(), m_materialLayout.handle()});
 
         asset::VertexInputDesc vin = asset::standardVertexInput();
         m_pipeline = PipelineBuilder(*m_context)
@@ -525,6 +549,15 @@ private:
         std::stable_sort(m_draws.begin(), m_draws.end(), [](const Draw& a, const Draw& b) {
             return std::tie(a.material, a.mesh) < std::tie(b.material, b.mesh);
         });
+
+        // objects[] is indexed by draw index, so it is built AFTER the sort.
+        m_objectData.reserve(m_draws.size());
+        for (const Draw& draw : m_draws) {
+            ObjectGpu obj;
+            obj.model = draw.model;
+            obj.material.x = static_cast<uint32_t>(std::max(draw.material, 0));
+            m_objectData.push_back(obj);
+        }
         spdlog::info("scene: N={} k={} meshes={} materials={} draws={}",
                      m_instances.size(),
                      MODEL_COUNT,
@@ -552,6 +585,8 @@ private:
     std::vector<ModelRange> m_models; // index-aligned with MODELS
     std::vector<GpuMaterial> m_materials;
     VkSampler m_sampler{VK_NULL_HANDLE}; // raw; destroyed in ~IndirectLab
+    std::vector<ObjectGpu> m_objectData;
+    GpuBuffer m_objectBuffer; // set 0, binding 1 — same place in every condition
     render::DescriptorSetLayout m_materialLayout;
     render::DescriptorSetLayout m_frameLayout;
     render::DescriptorPool m_pool;

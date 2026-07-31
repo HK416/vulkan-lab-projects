@@ -481,34 +481,26 @@ private:
         m_materialBuffer = GpuBuffer::createDeviceLocal(*m_context,
                                                         m_materialData.size() * sizeof(MaterialGpu),
                                                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-        m_objectBuffer = GpuBuffer::createDeviceLocal(*m_context,
-                                                      m_objectData.size() * sizeof(ObjectGpu),
-                                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         render::uploadDeviceLocal(*m_context,
                                   m_materialBuffer,
                                   m_materialData.data(),
                                   m_materialBuffer.size());
-        render::uploadDeviceLocal(*m_context,
-                                  m_objectBuffer,
-                                  m_objectData.data(),
-                                  m_objectBuffer.size());
 
         // The array is sized exactly (no PARTIALLY_BOUND / UPDATE_AFTER_BIND):
         // every slot is written once at setup and never changes. Culling (exp 2)
         // is what will need those flags.
         m_bindlessLayout = render::DescriptorSetLayout::Builder(*m_context)
                                .binding(0, SSBO, VK_SHADER_STAGE_FRAGMENT_BIT)
-                               .binding(1, SSBO, VK_SHADER_STAGE_VERTEX_BIT)
-                               .binding(2, IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT, textureCount)
-                               .binding(3, SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
+                               .binding(1, IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT, textureCount)
+                               .binding(2, SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT)
                                .build();
 
-        // Pool covers the one bindless set plus the per-frame UBO sets allocated
-        // by createFrameResources().
+        // Pool covers the one bindless set plus the per-frame sets allocated by
+        // createFrameResources() (UBO + the shared objects SSBO).
         std::vector<VkDescriptorPoolSize> sizes = {
             {IMAGE, textureCount},
             {SAMPLER, 1},
-            {SSBO, 2},
+            {SSBO, 1 + App::FRAMES_IN_FLIGHT},
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, App::FRAMES_IN_FLIGHT}};
         m_pool = render::DescriptorPool::create(*m_context, 1 + App::FRAMES_IN_FLIGHT, sizes);
         m_bindlessSet = m_pool.allocate(m_bindlessLayout.handle());
@@ -523,27 +515,25 @@ private:
         samplerInfo.sampler = m_sampler;
 
         VkDescriptorBufferInfo materials{m_materialBuffer.handle(), 0, m_materialBuffer.size()};
-        VkDescriptorBufferInfo objects{m_objectBuffer.handle(), 0, m_objectBuffer.size()};
         render::DescriptorWriter writer(*m_context);
         writer.writeBuffer(m_bindlessSet, 0, SSBO, materials)
-            .writeBuffer(m_bindlessSet, 1, SSBO, objects)
-            .writeImage(m_bindlessSet, 3, SAMPLER, samplerInfo);
+            .writeImage(m_bindlessSet, 2, SAMPLER, samplerInfo);
         for (uint32_t i = 0; i < m_materials.size(); ++i) {
             // Three consecutive array elements per material — the layout that
             // MaterialGpu::tex was built against in loadModels().
             writer
                 .writeImage(m_bindlessSet,
-                            2,
+                            1,
                             IMAGE,
                             image(m_materials[i].baseColor.view()),
                             3 * i)
                 .writeImage(m_bindlessSet,
-                            2,
+                            1,
                             IMAGE,
                             image(m_materials[i].metallicRoughness.view()),
                             3 * i + 1)
                 .writeImage(m_bindlessSet,
-                            2,
+                            1,
                             IMAGE,
                             image(m_materials[i].normal.view()),
                             3 * i + 2);
@@ -551,15 +541,30 @@ private:
         writer.flush();
     }
 
-    // set 0: per-frame camera + light UBO, one buffer/set per frame-in-flight so
-    // the CPU can write the next frame while the GPU reads the current one.
+    // set 0: per-frame camera + light UBO (one buffer/set per frame-in-flight, so
+    // the CPU can write the next frame while the GPU reads the current one) plus
+    // the static objects SSBO. The objects buffer belongs here — not in the
+    // material set — because it is identical in every condition, which is what
+    // keeps the vertex shader byte-identical across A0-A3 x B0/B1.
     void createFrameResources() {
+        m_objectBuffer = GpuBuffer::createDeviceLocal(*m_context,
+                                                      m_objectData.size() * sizeof(ObjectGpu),
+                                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        render::uploadDeviceLocal(*m_context,
+                                  m_objectBuffer,
+                                  m_objectData.data(),
+                                  m_objectBuffer.size());
+
         m_frameLayout = render::DescriptorSetLayout::Builder(*m_context)
                             .binding(0,
                                      VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
+                            .binding(1,
+                                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                     VK_SHADER_STAGE_VERTEX_BIT)
                             .build();
 
+        VkDescriptorBufferInfo objects{m_objectBuffer.handle(), 0, m_objectBuffer.size()};
         for (uint32_t i = 0; i < App::FRAMES_IN_FLIGHT; ++i) {
             m_frameUbo[i] = GpuBuffer::createHostVisible(*m_context,
                                                          sizeof(FrameUbo),
@@ -568,6 +573,7 @@ private:
             VkDescriptorBufferInfo info{m_frameUbo[i].handle(), 0, sizeof(FrameUbo)};
             render::DescriptorWriter(*m_context)
                 .writeBuffer(m_frameSet[i], 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, info)
+                .writeBuffer(m_frameSet[i], 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, objects)
                 .flush();
         }
     }
@@ -613,7 +619,7 @@ private:
     std::vector<MaterialGpu> m_materialData;
     std::vector<ObjectGpu> m_objectData;
     GpuBuffer m_materialBuffer; // set 1, binding 0
-    GpuBuffer m_objectBuffer;   // set 1, binding 1
+    GpuBuffer m_objectBuffer;   // set 0, binding 1 — same place in every condition
     render::DescriptorSetLayout m_bindlessLayout;
     render::DescriptorSetLayout m_frameLayout;
     render::DescriptorPool m_pool;

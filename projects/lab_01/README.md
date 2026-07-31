@@ -59,7 +59,9 @@ template/src/ (재사용, 구현 완료)
 5. `onRender` — `sampleCamera`로 뷰/투영 갱신 → 인스턴스 루프:
    - 머티리얼 바뀌면 `vkCmdBindDescriptorSets` (B0)
    - 메시 버퍼 `vkCmdBindVertexBuffers`/`vkCmdBindIndexBuffer` (A0)
-   - per-object 변환은 push constant
+   - per-object 변환은 `objects[]` SSBO(set 0, binding 1)를 `gl_BaseInstance`로 인덱싱.
+     push constant가 아니다 — 인덱스 경로는 시리즈 공통 고정 제어이며(설계 §3),
+     A0 vs A1(lab_03)이 드로우 방식만 다르려면 여기서도 같아야 한다
    - `vkCmdDrawIndexed`
    - 렌더 순서 = 조건 간 동일하게 **정렬 고정**(머티리얼→메시 그룹핑, 오버드로우 패턴 고정)
 
@@ -115,9 +117,10 @@ for i in 0..N-1:
 
 ## 하니스 변경 (template)
 
-- **Swapchain 프레젠트 모드 (미완)** — 현재 `swapchain.cpp`에서 `VK_PRESENT_MODE_FIFO_KHR`
-  하드코딩. `VK_PRESENT_MODE_IMMEDIATE_KHR` opt-in 추가 필요(지원 시 선택, 미지원 시
-  폴백 로그). vsync 제거는 실험 필수 조건. **lab_01에서 처리할 유일한 template 변경.**
+- **Swapchain 프레젠트 모드 (완료)** — `VK_PRESENT_MODE_IMMEDIATE_KHR` opt-in 추가됨
+  (지원 시 선택, 미지원 시 폴백 로그). vsync 제거는 실험 필수 조건.
+- **프레임 캡처 / 결정론적 종료 (완료)** — `LAB_FRAMES`·`LAB_CAPTURE`·`LAB_CAPTURE_FILE`.
+  픽셀 동등성 검증은 `projects/imgdiff`가 담당.
 - 나머지(Context/CommandPool/sync/FrameContext depth, render/asset/scene/bench)는 그대로 재사용.
 
 ---
@@ -189,7 +192,10 @@ Dependencies: **cgltf**, **ktx** — already in `vcpkg.json` + the top-level `pr
 5. `onRender` — update view/proj via `sampleCamera` → loop over instances:
    - if material changed, `vkCmdBindDescriptorSets` (B0)
    - bind mesh vertex/index buffers `vkCmdBindVertexBuffers`/`vkCmdBindIndexBuffer` (A0)
-   - per-object transform via push constant
+   - per-object transform read from the `objects[]` SSBO (set 0, binding 1) via
+     `gl_BaseInstance`. Not a push constant — the index path is a fixed control
+     across the series (design §3), and A0 vs A1 (lab_03) can only differ in the
+     draw technique if this matches
    - `vkCmdDrawIndexed`
    - render order = **fixed sort** identical across conditions (material→mesh grouping, fixed overdraw pattern)
 
@@ -247,10 +253,11 @@ for i in 0..N-1:
 
 ## Harness changes (template)
 
-- **Swapchain present mode (pending)** — currently hardcoded to `VK_PRESENT_MODE_FIFO_KHR`
-  in `swapchain.cpp`. Add a `VK_PRESENT_MODE_IMMEDIATE_KHR` opt-in (select if
-  supported, log a fallback otherwise). Removing vsync is a mandatory experiment
-  condition. **The one template change lab_01 still has to make.**
+- **Swapchain present mode (done)** — `VK_PRESENT_MODE_IMMEDIATE_KHR` opt-in added
+  (selected when supported, logs a fallback otherwise). Removing vsync is a
+  mandatory experiment condition.
+- **Frame capture / deterministic exit (done)** — `LAB_FRAMES`, `LAB_CAPTURE`,
+  `LAB_CAPTURE_FILE`. The pixel-equivalence check itself lives in `projects/imgdiff`.
 - Everything else (Context/CommandPool/sync/FrameContext depth, render/asset/scene/bench) is reused as-is.
 
 ---
