@@ -287,6 +287,8 @@ void Context::createLogicalDevice() {
     const DeviceFeatures& req = m_requestedFeatures;
     DeviceFeatures& en = m_enabledFeatures;
     en.multiDrawIndirect = req.multiDrawIndirect && supported2.features.multiDrawIndirect;
+    en.drawIndirectFirstInstance =
+        req.drawIndirectFirstInstance && supported2.features.drawIndirectFirstInstance;
     en.drawIndirectCount = req.drawIndirectCount && supported12.drawIndirectCount;
     en.descriptorIndexing = req.descriptorIndexing && supported12.descriptorIndexing;
     en.shaderDrawParameters = req.shaderDrawParameters && supported11.shaderDrawParameters;
@@ -320,7 +322,7 @@ void Context::createLogicalDevice() {
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features2.pNext = &features11;
     features2.features.multiDrawIndirect = en.multiDrawIndirect;
-    features2.features.drawIndirectFirstInstance = en.multiDrawIndirect;
+    features2.features.drawIndirectFirstInstance = en.drawIndirectFirstInstance;
     // Baseline: every lab benchmarks, so enable pipeline-statistics queries when
     // the device offers them (bench::GpuQueries degrades gracefully if not).
     features2.features.pipelineStatisticsQuery = supported2.features.pipelineStatisticsQuery;

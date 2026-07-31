@@ -17,6 +17,10 @@ namespace lab::render {
 // Context::enabledFeatures() to branch at runtime.
 struct DeviceFeatures {
     bool multiDrawIndirect = false;
+    // Indirect commands with firstInstance != 0 — how the object index reaches
+    // the shader in every indirect condition. Separate from multiDrawIndirect:
+    // a device may offer one without the other.
+    bool drawIndirectFirstInstance = false;
     bool drawIndirectCount = false;
     bool descriptorIndexing = false;
     bool shaderDrawParameters = false;
