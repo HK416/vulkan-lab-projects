@@ -68,8 +68,10 @@ cmake --build --preset default --target lab_00
 | [lab_04](projects/lab_04/README.md) | A1 × B1 | 〃 | Bindless |
 | [lab_05](projects/lab_05/README.md) | A2 × B0 | **단일 버퍼** + 오브젝트당 indirect | 머티리얼당 descriptor set |
 | [lab_06](projects/lab_06/README.md) | A2 × B1 | 〃 | Bindless |
+| [lab_07](projects/lab_07/README.md) | A3 × B1 | 단일 버퍼 + **multi-draw indirect** (프레임당 1회) | Bindless |
 
-유효 조건은 총 7개(A3 × B0은 불가능)이며 **A3(lab_07) 하나만 미구현**이다.
+**유효 조건 7개 전부 구현 완료.** A3 × B0은 원리적으로 불가능하다 — multi-draw는
+드로우 사이에 재바인딩 지점이 없어 머티리얼별 descriptor set 교체를 할 수 없다.
 
 **비교쌍 주의** — A 요인은 직교가 아니다. 단독 결론에 쓸 수 있는 쌍은
 **A0 vs A1**(lab_01↔03, lab_02↔04)과 **A2 vs A3**(lab_05/06↔07)뿐이다.
@@ -178,9 +180,11 @@ is the single source of truth for the design, factors and measurement protocol.
 | [lab_04](projects/lab_04/README.md) | A1 × B1 | same | bindless |
 | [lab_05](projects/lab_05/README.md) | A2 × B0 | **single buffer** + per-object indirect | one descriptor set per material |
 | [lab_06](projects/lab_06/README.md) | A2 × B1 | same | bindless |
+| [lab_07](projects/lab_07/README.md) | A3 × B1 | single buffer + **multi-draw indirect** (one call per frame) | bindless |
 
-There are 7 valid conditions in total (A3 × B0 is impossible); **only A3 (lab_07)
-is left**.
+**All 7 valid conditions are implemented.** A3 × B0 is impossible in principle:
+multi-draw has no rebind point between draws, so per-material descriptor sets
+cannot be swapped.
 
 **Mind the comparison pairs** — factor A is not orthogonal. The only pairs valid
 for a standalone conclusion are **A0 vs A1** (lab_01↔03, lab_02↔04) and **A2 vs
