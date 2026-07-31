@@ -54,6 +54,28 @@ GpuQueries::GpuQueries(render::Context& context) : m_context(&context) {
     }
 }
 
+GpuQueries::GpuQueries(GpuQueries&& other) noexcept
+    : m_context(other.m_context), m_timestampPool(other.m_timestampPool),
+      m_statsPool(other.m_statsPool), m_timestampPeriod(other.m_timestampPeriod),
+      m_timestampsSupported(other.m_timestampsSupported) {
+    other.m_timestampPool = VK_NULL_HANDLE;
+    other.m_statsPool = VK_NULL_HANDLE;
+}
+
+GpuQueries& GpuQueries::operator=(GpuQueries&& other) noexcept {
+    if (this != &other) {
+        destroy();
+        m_context = other.m_context;
+        m_timestampPool = other.m_timestampPool;
+        m_statsPool = other.m_statsPool;
+        m_timestampPeriod = other.m_timestampPeriod;
+        m_timestampsSupported = other.m_timestampsSupported;
+        other.m_timestampPool = VK_NULL_HANDLE;
+        other.m_statsPool = VK_NULL_HANDLE;
+    }
+    return *this;
+}
+
 GpuQueries::~GpuQueries() {
     destroy();
 }

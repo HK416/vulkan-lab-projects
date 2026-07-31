@@ -29,6 +29,11 @@ public:
     GpuQueries() = delete;
     GpuQueries(const GpuQueries&) = delete;
     GpuQueries& operator=(const GpuQueries&) = delete;
+    // Movable so a lab can keep one per frame-in-flight in a plain vector. The
+    // alternative — an array of std::optional — is a construct no static analysis
+    // can prove is engaged, so every access reads as a possible null deref.
+    GpuQueries(GpuQueries&& other) noexcept;
+    GpuQueries& operator=(GpuQueries&& other) noexcept;
     explicit GpuQueries(render::Context& context);
     ~GpuQueries();
 
